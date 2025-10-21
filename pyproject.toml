@@ -29,6 +29,7 @@ dependencies = [
     "click (>=8.2.1,<9.0.0)",
     "threadpoolctl (>=3.6.0,<4.0.0)",
     "rich (>=14.1.0,<15.0.0)",
+    "hatch (>=1.5.1, <2.0.0)",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -40,13 +41,10 @@ dynamic=[
 ]
 
 [project.optional-dependencies]
-dev = ["fawltydeps", "vermin"]
+dev = ["fawltydeps", "vermin", "pyubx2"]
 
 [project.scripts]
 tomosar = "tomosar.toolbox.tomosar:tomosar"
-tomotest = "tomosar.tests.tomotest:tomotest"
-tomoview = "tomosar.toolbox.tomoview:tomoview"
-tomoprocess = "tomosar.toolbox.tomoprocess:tomoprocess"
 
 [project.urls]
 Homepage = "https://github.com/ansgarj/TomoSAR.git"

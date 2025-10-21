@@ -13,9 +13,9 @@ from collections import defaultdict, Counter
 import json
 from matplotlib.figure import Figure
 
-from .utils import warn, find_inliers, format_duration, add_meta
+from .utils import find_inliers, format_duration, add_meta
+from .binaries import elevation
 from .apperture import SARModel
-from .environment import find_dem, get_dem
 from .config import Frequencies
 FREQUENCIES = Frequencies()
 
@@ -333,7 +333,7 @@ def analyze_spiral(track, track_info, base_ele, dem_path):
     track_info['duration (s)'] = track['% GPST (s)'].iloc[-1] - track['% GPST (s)'].iloc[0]
     # Calculate new variables and parameters
     az, r, lat0, lon0 = _get_azimuth(track)
-    h0 = _get_elevation(dem_path, lat0, lon0)
+    h0 = elevation(lat0, lon0, dem_path)
     flight_alt = track['alt (m)'].to_numpy() - h0 # Flight altitude relative center point
     # Add variables to track data
     track['radius (m)'] = r
@@ -350,17 +350,6 @@ def analyze_spiral(track, track_info, base_ele, dem_path):
     track_info['bottom_flight_altitude'] = round(flight_alt.min())
 
     return track, track_info
-
-def _get_elevation(dem_path: str|Path, lat0: float, lon0: float) -> float|None:
-    dem_path = find_dem(dem_path)
-    dem, src = get_dem(dem_path, lat0, lon0)
-
-    if src:
-        x, y = src.index(lon0, lat0)
-        return dem[x,y]
-    else:
-        warn("No DEM found.")
-        return None
 
 ## Analyze linear tracks
 def analyze_linear(tracks, tracks_info, base_ele):

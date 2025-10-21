@@ -631,33 +631,31 @@ def linear_model_str(model: LinearRegression, var: str = 't', rounded: bool = Tr
         return "0"
     if rounded:
         return f"{f'{model.intercept_:.3g}' if model.intercept_ != 0 else ''}{
-                    f' + {model.coef_[0]:.3g} * {var}' if model.coef_[0] > 0 else  \
-                    f' - {abs(model.coef_[0]):.3g} * {var}' if model.coef_[0] < 0 else \
-                    ''
-                }"
+            f' + {model.coef_[0]:.3g} * {var}' if model.coef_[0] > 0 else f' - {abs(model.coef_[0]):.3g} * {var}' if model.coef_[0] < 0 else ''
+        }"
     else:
         return f"{f'{model.intercept_}' if model.intercept_ != 0 else ''}{
-                    f' + {model.coef_[0]} * {var}' if model.coef_[0] > 0 else  \
-                    f' - {abs(model.coef_[0])} * {var}' if model.coef_[0] < 0 else \
-                    ''
-                }"
+            f' + {model.coef_[0]} * {var}' if model.coef_[0] > 0 else f' - {abs(model.coef_[0])} * {var}' if model.coef_[0] < 0 else ''
+        }"
 
-def prompt_ftp_login(server: str, max_attempts: int = 3, default_user: str = "", anonymous: bool = False):
+def prompt_ftp_login(server: str, max_attempts: int = 3, user: str = None, pw: str = None, anonymous: bool = False):
     """
     Prompts for FTP login credentials and retries if login fails.
     Returns a connected FTP object.
     """
-    user_prompt = f"Enter username for {server}" + f"{f' (press enter for {default_user})' if default_user else ''}" + ": "
     for attempt in range(1, max_attempts + 1):
         if anonymous:
             ftp_user = "anonymous"
             ftp_pass = "none"
         else:
-            ftp_user = input(user_prompt)
-            if not ftp_user:
-                ftp_user = default_user
-
-            ftp_pass = getpass("Enter password: ")
+            if user:
+                ftp_user = user
+            else:
+                ftp_user = input(f"Enter username for {server}: ")
+            if pw:
+                ftp_pass = pw
+            else:
+                ftp_pass = getpass(f"Enter password for {server}: ")
             
         try:
             ftp = FTP(server)

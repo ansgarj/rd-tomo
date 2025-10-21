@@ -7,9 +7,41 @@ import matplotlib.pyplot as plt
 import csv
 import struct
 import numpy as np
+import subprocess
 
 from ..gnss import extract_rnx_info, read_out_file, read_pos_file
 from ..binaries import rnx2rtkp, resource
+from ..config import PACKAGE_PATH
+
+from pathlib import Path
+   
+@click.command()
+@click.argument("input_file", type=click.Path(exists=True, path_type=Path))
+@click.option("-d", "--duration", type=int, help="Minimized duration (seconds)", default=600)
+def minimize_ubx(input_file, duration: int = 600) -> None:
+    from pyubx2 import UBXReader
+    with open(input_file, 'rb') as infile:
+        ubr = UBXReader(infile, protfilter=2)  # UBX only
+        messages = []
+        start_itow = None
+
+        for raw_data, parsed_data in ubr:
+            if hasattr(parsed_data, 'iTOW'):
+                if start_itow is None:
+                    start_itow = parsed_data.iTOW
+                if parsed_data.iTOW - start_itow <= duration * 1000:
+                    messages.append(raw_data)
+                else:
+                    break
+            else:
+                if start_itow is not None:
+                    messages.append(raw_data)
+    output_file = PACKAGE_PATH / "tests" / "minimal.ubx"
+    with open(output_file, 'wb') as outfile:
+        for msg in messages:
+            outfile.write(msg)
+
+    print(f"Saved {len(messages)} messages to {output_file}")
 
 @click.command()
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
@@ -30,7 +62,6 @@ def rnx_info(file: Path) -> None:
         print(f"Header position: lat={lat}, lon={lon}, height={h}")
     else:
         print("No position given in file header.")
-
 
 def extract_imu_to_csv(bin_filename: str | Path, csv_filename: str | Path, num_samples: int = None):
     labels = [
@@ -80,10 +111,20 @@ def read_imu(file: Path, num: int|None) -> None:
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
 def inspect_out(file: Path) -> None:
     """Inspect the .out file produced by glab."""
-    read_out_file(
+    _, _, conv_idx, _, residuals = read_out_file(
         file_path=file,
         verbose=True
     )
+    coords = ["X", "Y", "Z"]
+    plt.axvline(x=conv_idx, linestyle="--", color='r', label="Convergence")
+    for i, res in enumerate(residuals):
+        plt.plot(res, label=f"{coords[i]}")
+        plt.xlabel("Epoch number")
+        plt.ylabel("Residual")
+        plt.title("Residual plot")
+        plt.legend()
+    plt.show()
+
 
 
 def plot_coordinates(coords1, coords2, labels, title1, title2):

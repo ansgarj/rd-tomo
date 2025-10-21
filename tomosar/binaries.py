@@ -10,16 +10,29 @@ from importlib.resources import path as importpath
 from contextlib import contextmanager
 from typing import Iterator
 from contextlib import ExitStack
+import rasterio
+from rasterio.io import DatasetReader
+from xml.etree import ElementTree as ET
+import numpy as np
+from pyproj import Transformer
 
 from .utils import changed, warn
 from .config import Settings, LOCAL
 
 # Catch-all run command for binariy executables
 def run(cmd: str | list):
+    # Makes Paths relative to CWD if in the CWD tree
+    def local(path: Path):
+        try:
+            return str(path.relative_to(Path.cwd()))
+        except:
+            return str(path)
+    
     if not isinstance(cmd, list):
         cmd = [cmd]
     binary_name = cmd[0]
     require_binary(binary_name)
+    cmd = [local(part) if isinstance(part, Path) else part for part in cmd]
     if Settings().VERBOSE:
             print(' '.join(cmd))
     try:
@@ -41,7 +54,7 @@ def require_binary(name: str, hint: str|None = None) -> str:
     path = shutil.which(name)
     if path is None:
         if not hint:
-            raise RuntimeError(f"Required binary '{name}' not found in PATH.\n\033[1mSource\033[22m: {dep["Source"]}")
+            raise RuntimeError(f"Required binary '{name}' not found in PATH.\n\033[1mSource\033[22m: {dep['Source']}")
         else:
             raise RuntimeError(f"Required binary '{name}' not found in PATH.\n{hint}")
     return path
@@ -83,7 +96,7 @@ def substitute_flags(path: Path, resolved: dict):
 
 # Get resource file
 @contextmanager
-def resolve_resources(keys, resource_func, **kwargs):
+def _resolve_resources(keys, resource_func, **kwargs) -> Iterator[dict]:
     """Context manager that resolves multiple resource keys and keeps them alive."""
     with ExitStack() as stack:
         resolved = {}
@@ -98,19 +111,19 @@ def resolve_resources(keys, resource_func, **kwargs):
         yield resolved
 
 @contextmanager
-def resource(path: str | Path | None, key: str, **kwargs) -> Iterator[Path]:
+def resource(path: str | Path | None, key: str, **kwargs) -> Iterator[Path|float]:
     """Provides a temporary local copy of the file specified in path. If path is empty or None,
     provides a temporary local copy of a file specified in settings or fetched internally based on key.
 
     If no file is provided None is yielded.
 
-    Valid keys: 'SATELLITES', 'SWEPOS_COORDINATES', 'RTKP_CONFIG', 'RECEIVER' 'DEM', 'CANOPY'
+    Valid keys: 'SATELLITES', 'SWEPOS_COORDINATES', 'RTKP_CONFIG', 'RECEIVER' 'DEM'', 'CANOPY'
     NOTE: RTKP_CONFIG can be called with standard=True to disable demo5 specific options in internal files
     NOTE: RECEIVER takes antenna (required) and radome (optional) keywords
     NOTE: DEM and CANOPY take bounds (required) and res (required) keywords"""
     # Generate a local copy of a file
     def local_copy(file: Path) -> Path:
-        if file.exists() and file.is_file():
+        if file.is_file():
             tmp_path = Path.cwd() / file.with_suffix(".tmp").name
             shutil.copy2(file, tmp_path)
             return tmp_path
@@ -173,8 +186,8 @@ def resource(path: str | Path | None, key: str, **kwargs) -> Iterator[Path]:
             if res is None:
                 raise KeyError("To get a DEM resource, resolution must be specified (resolution=)")
             vrt_path = LOCAL / "DEM.vrt"
-            vrt_path = build_vrt(Settings().DEMS)
-            tmp_path = generate_raster(vrt_path)
+            vrt_path = build_vrt(vrt_path, Settings().DEMS)
+            tmp_path = generate_raster(vrt_path, bounds, res)   
         case "CANOPY":
             bounds = kwargs.get("bounds", None)
             if bounds is None:
@@ -185,6 +198,9 @@ def resource(path: str | Path | None, key: str, **kwargs) -> Iterator[Path]:
             vrt_path = LOCAL / "CANOPY.vrt"
             vrt_path = build_vrt(Settings().CANOPIES)
             tmp_path = generate_raster(vrt_path)
+        case "TEST_FILE":
+            with importpath('tomosar.tests',"minimal.ubx") as test_file:
+                tmp_path = local_copy(test_file)
 
     if tmp_path is None and filename:
         with importpath('tomosar.data', filename) as resource_path:
@@ -192,13 +208,16 @@ def resource(path: str | Path | None, key: str, **kwargs) -> Iterator[Path]:
             tmp_path = local_copy(resource_path)
     
     # Find all {{KEY}} in the file
-    with open(tmp_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-    keys = set(re.findall(r"\{\{(\w+)\}\}", content))
+    try:
+        with open(tmp_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        keys = set(re.findall(r"\{\{(\w+)\}\}", content))
+    except (TypeError, UnicodeDecodeError):
+        keys = {}
 
     # Resolve and substitute
     if keys:
-        with resolve_resources(keys, resource, **kwargs) as resolved:
+        with _resolve_resources(keys, resource, **kwargs) as resolved:
             substitute_flags(tmp_path, resolved)
             # Yield temporary local path
             try:
@@ -210,66 +229,160 @@ def resource(path: str | Path | None, key: str, **kwargs) -> Iterator[Path]:
         try:
             yield tmp_path
         finally:
-            tmp_path.unlink(missing_ok=True)  # Clean up after use
+            if isinstance(tmp_path, Path):
+                tmp_path.unlink(missing_ok=True)  # Clean up after use
+
+# Get elevation from DEMs for a point
+def elevation(lat: float, lon: float, dem_path: Path|str = None) -> float | None:
+    """Returns the elevation for a specific point from the highest resolved DEM at that point,
+    or from the user specified DEM."""
+    def  get_dem():
+        def _check_file_type(filename: Path) -> str:
+            ext = filename.suffix.lower()
+            if ext in [".tif", ".tiff"]:
+                return "TIFF"
+            elif ext == ".vrt":
+                return "VRT"
+            else:
+                return "Unknown"
+        file_type = _check_file_type(dem_path)
+        def _point_in_bounds(src: DatasetReader) -> bool:
+            bounds = src.bounds
+            try:
+                transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
+                x, y = transformer.transform(lon, lat)
+                return bounds.left <= x <= bounds.right and bounds.bottom <= y <= bounds.top
+            except Exception:
+                return False
+
+        def _find_raster_in_vrt(vrt_path: Path) -> str | None:
+            tree = ET.parse(vrt_path)
+            root = tree.getroot()
+            for source in root.iter("SourceFilename"):
+                raster_name = source.text
+                raster_path = vrt_path.parent / raster_name
+                try:
+                    with rasterio.open(raster_path) as src:
+                        if _point_in_bounds(src, lat, lon):
+                            return str(raster_path)
+                except Exception:
+                    continue
+            return None
+
+        if file_type == "TIFF":
+            with rasterio.open(dem_path) as src:
+                if _point_in_bounds(src, lat, lon):
+                    dem = src.read(1)
+                    return dem, src
+                else:
+                    return np.array([]), None
+        
+        elif file_type == "VRT":
+            raster_path = _find_raster_in_vrt(dem_path, lat, lon)
+            if raster_path:
+                with rasterio.open(raster_path) as src:
+                    dem = src.read(1)
+                    return dem, src
+            else:
+                return np.array([]), None
+        
+        else:
+            return np.array([]), None
     
+    dem_path = Path(dem_path)
+    if dem_path.is_file():
+        dem, src = get_dem(dem_path)
+    else:
+        vrt_path = LOCAL / "DEM.vrt"
+        dem_path = build_vrt(vrt_path, Settings().DEMS)
+        
+        dem, src = get_dem()    
+
+    if src:
+        x, y = src.index(lon, lat)
+        return dem[x,y]
+    else:
+        warn(f"No DEM found for coordinates ({lat}, {lon})")
+        return None
+          
 # Named functions for binary executables
 def crx2rnx(crx_file: str|Path):
     rnx_path = crx_file.with_suffix('.rnx')
-    print(f"Unpacking {crx_file} > {rnx_path} ...", end=" ", flush=True)
-    run(['crx2rnx', '-d', crx_file])
-    print("done.")
+    run(['crx2rnx', crx_file])
+    crx_file.unlink(missing_ok=True)
     return rnx_path
 
-def _generate_merged_filenames(files: list[Path]) -> Path|None:
-        pattern = re.compile(
-            r"^(?P<source>[A-Z0-9]{10})_(?P<datetime>\d{11})_(?P<duration>\d{2}[SMHD])_(?P<freq>\d{2}[SMHD])_(?P<type>[A-Z]+)\.(?P<ext>[A-Z0-9]{3})$"
-        )
-        units = re.compile(
-            r"(?P<number>\d{2})(?P<unit>[SMHD])"
-        )
-        grouped = defaultdict(set)
-        for f in files:
-            if (match := pattern.match(f.name)):
-                key = (
-                    match.group("source"),
-                    match.group("freq"),
-                    match.group("type"),
-                    match.group("duration"),
-                    match.group("ext")
-                )
-                grouped[key].add(int(match.group("datetime")))
+def _generate_merged_filenames(files: list[Path]) -> Path | None:
+    pattern = re.compile(
+        r"^(?:(?P<station>[A-Z0-9]{9})_)?(?P<source>[A-Z0-9]{1,10})_(?P<datetime>\d{11})_(?P<duration>\d{2}[SMHD])(?:_(?P<freq>\d{2}[SMHD]))?_(?P<type>[A-Z]+)\.(?P<ext>[A-Za-z0-9]{3})$"
+    )
+    units = re.compile(r"(?P<number>\d{2})(?P<unit>[SMHD])")
+    grouped = defaultdict(set)
 
-        descriptive_filenames = []
-        for (source, frequency, type, duration, ext), datetimes in grouped.items():
-            datetime = min(datetimes)
-            if (match := units.match(duration)):
-                dur = int(match.group("number"))
-                dur_unit = match.group("unit")
+    for f in files:
+        if (match := pattern.match(f.name)):
+            type_raw = match.group("type")
+            if type_raw.endswith("N"):
+                type = "NAV"
+            elif type_raw.endswith("O"):
+                type = "OBS"
             else:
-                raise RuntimeError(f"Failed to parse filenames: {files}")
-            no_files = len(datetimes)
-            dur = dur * no_files
-            if type.endswith("O"):
-                # Observation file:
-                out_type = "MO"
-            elif type.endswith("N"):
-                # Navigation data file
-                out_type = "MN"
-            elif type == "ORB" or type == "CLK":
-                # Ephemeris file
-                out_type = type
-            merged_filename = files[0] / f"{source}_{datetime}_{dur:02}{dur_unit}_{frequency}_{out_type}.{ext}"
-            descriptive_filenames.append(merged_filename)
-        if len(descriptive_filenames) > 1:
-            raise RuntimeError(f"Unable to merge files due to conflicting sources, frequencies, durations, types or extensions. Merging aborted. Files: {files}")
-        return descriptive_filenames[0] if descriptive_filenames else None
+                type = type_raw
 
-def merge_rnx(rnx_files: list[str|Path], force: bool = False):
+            stat = match.group("station") or ""
+            freq = match.group("freq") or ""
+            key = (
+                stat,
+                match.group("source"),
+                freq,
+                type,
+                match.group("duration"),
+                match.group("ext")
+            )
+            grouped[key].add(int(match.group("datetime")))
+
+    descriptive_filenames = []
+    for (station, source, frequency, type, duration, ext), datetimes in grouped.items():
+        datetime = min(datetimes)
+        if (match := units.match(duration)):
+            dur = int(match.group("number"))
+            dur_unit = match.group("unit")
+        else:
+            raise RuntimeError(f"Failed to parse filenames: {files}")
+        no_files = len(datetimes)
+        dur *= no_files
+
+        if type == "OBS":
+            out_type = "MO"
+            out_ext = "obs"
+        elif type == "NAV":
+            out_type = "MN"
+            out_ext = "nav"
+        elif type in {"ORB", "CLK"}:
+            out_type = type
+            out_ext = ext
+        else:
+            out_type = type
+        if station:
+            merged_filename = f"{station}_{source}_{datetime}_{dur:02}{dur_unit}"
+        else:
+            merged_filename = f"{source}_{datetime}_{dur:02}{dur_unit}"
+        if frequency:
+            merged_filename += f"_{freq}"
+        merged_filename += f"_{out_type}.{out_ext}"
+        merged_filename = files[0].parent.parent / merged_filename
+        descriptive_filenames.append(merged_filename)
+
+    if len(descriptive_filenames) > 1:
+        raise RuntimeError(f"Unable to merge files due to conflicting sources, frequencies, durations, types or extensions. Merging aborted. Files: {files}")
+    return descriptive_filenames[0] if descriptive_filenames else None
+
+def merge_rnx(rnx_files: list[str|Path], force: bool = False) -> Path|None:
     merged_file = _generate_merged_filenames(rnx_files)
     if merged_file and merged_file.exists() and not force:
         print(f"Discovered merged file {merged_file}. Aborting merge of RNX files.")
-    print(f"Merging observation files > {merged_file} ...", end=" ", flush=True)
-    run(["gfzrnx", "-q", "-finp"] + [f for f in rnx_files] + ["-fout", merged_file])
+    print(f"Merging rinex files > {merged_file} ...", end=" ", flush=True)
+    run(["gfzrnx", "-f", "-q", "-finp"] + [f for f in rnx_files] + ["-fout", merged_file])
     print("done.")
     return merged_file
 
@@ -309,45 +422,47 @@ def ubx2rnx(ubx_file: str|Path):
     sbs_path = ubx_file.with_suffix(".sbs")
     nav_path = ubx_file.with_suffix(".nav")
     obs_path = ubx_file.with_suffix(".obs")
-    run(["convbin", "-r", "ubx", "-od", "-os", "-o", ubx_file])
+    result = run(["convbin", "-r", "ubx", "-od", "-os", "-o", str(obs_path), "-n", str(nav_path), "-s", str(sbs_path), str(ubx_file)])
+    print(result.stdout)
     return obs_path, nav_path, sbs_path
 
 def rnx2rtkp(
         rover_obs: str|Path,
         base_obs: str|Path,
         nav_file: str|Path,
-        config: str|Path,
         out_path: str|Path,
+        config_file: str|Path = None,
         mocoref_file: str|Path = None,
         sbs_file: str|Path = None
 ) -> None:
-    cmd = ['rnx2rtkp', '-k', config, '-o', out_path]
-    if mocoref_file:
-        with open(mocoref_file, 'r') as f:
-            mocoref = json.load(f)
-        print(f"mocoref: {mocoref}")
-        h = mocoref["h"] - 0.2
-        cmd.extend(["-l", str(mocoref["lat"]), str(mocoref["lon"]), str(h)])
-    cmd.extend([rover_obs, base_obs, nav_file])
-    if sbs_file:
-        cmd.append(sbs_file)
-    print(f"Running RTKP post processing on rover {rover_obs} with base {base_obs} ...", end=" ", flush=True)
-    try: 
-        run(cmd)
-    except RuntimeError:
-        with resource(None, "RTKP_CONFIG", standard=True) as new_config:
-            cmd[2] = new_config
+    with resource(config_file, "RTKP_CONFIG") as config:
+        cmd = ['rnx2rtkp', '-k', str(config), '-o', str(out_path)]
+        if mocoref_file:
+            with open(mocoref_file, 'r') as f:
+                mocoref = json.load(f)
+            print(f"mocoref: {mocoref}")
+            h = mocoref["h"] - 0.2
+            cmd.extend(["-l", str(mocoref["lat"]), str(mocoref["lon"]), str(h)])
+        cmd.extend([rover_obs, base_obs, nav_file])
+        if sbs_file:
+            cmd.append(sbs_file)
+        print(f"Running RTKP post processing on rover {rover_obs} with base {base_obs} ...", end=" ", flush=True)
+        try: 
             run(cmd)
+        except RuntimeError:
+            if config_file is None:
+                with resource(None, "RTKP_CONFIG", standard=True) as new_config:
+                    cmd[2] = str(new_config)
+                    run(cmd)
     print("done.")
 
 def _ant_type(rinex_path) -> tuple[None|str, None|str]:
     with open(rinex_path, 'r') as f:
         for line in f:
             if 'ANT # / TYPE' in line:
-                # ANT TYPE is typically in columns 21–40
-                ant_type = line[20:40].strip()
-                # Radome is typically in columns 41–60, but may be missing
-                radome = line[40:60].strip() or "NONE"
+                # ANT TYPE and RADOME is typically in columns 21–60
+                print(line)
+                ant_type, radome = line[20:60].split()
                 return ant_type, radome
     return None, None
 
@@ -362,40 +477,36 @@ def ppp(
     ) -> None:
     with resource(atx_file, "SATELLITES") as atx:
         antenna_type, radome = _ant_type(obs_file)
-        with resource(antrec_file, antenna=antenna_type, radome=radome) as receiver:
+        print(f"Detected type: {antenna_type} {radome}")
+        with resource(antrec_file, "RECEIVER", antenna=antenna_type, radome=radome) as receiver:
+            cmd = [
+                'glab',
+                    '-input:obs', obs_file,
+                    '-input:ant', atx,
+                    '-input:orb', sp3_file,
+                    '-input:clk', clk_file,
+                    '-pre:sat', '-EC0',
+                    '--summary:waitfordaystart'
+            ]
             if navglo_file:
-                cmd = [
-                    'glab',
-                    '-input:obs', obs_file,
-                    '-input:navglo', navglo_file,
-                    '-input:ant', atx.name,
-                    '-input:antrec', receiver.name,
-                    '-input:orb', sp3_file,
-                    '-input:clk', clk_file,
-                    '-model:recphasecenter', "1", "0", "0", "0.9",
-                    '-model:recphasecenter', "2", "0", "0", "0.9",
-                    '-model:recphasecenter', "3", "0", "0", "0.9",
-                    '-model:recphasecenter', "4", "0", "0", "0.9",
-                    '-model:recphasecenter', "5", "0", "0", "0.9",
-                ]
+                cmd.extend(["-input:navglo", navglo_file])
+            if receiver:
+                cmd.extend(["-input:antrec", receiver])
             else:
-                cmd = [
-                    'glab',
-                    '-input:obs', obs_file,
-                    '-input:ant', atx.name,
-                    '-input:orb', sp3_file,
-                    '-input:clk', clk_file,
-                    #'-filter:backward', 
-                    '-model:recphasecenter', "1", "0", "0", "0.9",
-                    '-model:recphasecenter', "2", "0", "0", "0.9",
-                    '-model:recphasecenter', "3", "0", "0", "0.9",
-                    '-model:recphasecenter', "4", "0", "0", "0.9",
-                    '-model:recphasecenter', "5", "0", "0", "0.9",
-                ]
+                pass
+                # cmd.extend([
+                #     '-model:recphasecenter', "1", "0", "0", "0.9",
+                #     '-model:recphasecenter', "2", "0", "0", "0.9",
+                #     '-model:recphasecenter', "3", "0", "0", "0.9",
+                #     '-model:recphasecenter', "4", "0", "0", "0.9",
+                #     '-model:recphasecenter', "5", "0", "0", "0.9",
+                # ])
             print(f"Running station PPP on {obs_file} > {out_path} ...", end=" ", flush=True)
             result = run(cmd)
             out_path.write_text(result.stdout)
             print("done. ")
+    
+    return result.stdout
 
 # VRT
 def build_vrt(vrt_path: Path|str, paths: list[Path|str]) -> Path:
@@ -421,7 +532,7 @@ def build_vrt(vrt_path: Path|str, paths: list[Path|str]) -> Path:
     hash_path = vrt_path.with_suffix(".hash")
     if changed(hash_path, tif_files):
         print("Building new VRT ...", end=" ", flush=True)
-        cmd = ["gdalbuildvrt", "-resolution", "highest", str(vrt_path)] + [str(f) for f in tif_files]
+        cmd = ["gdalbuildvrt", "-resolution", "highest", vrt_path] + [f for f in tif_files]
         run(cmd)
 
 def generate_raster(

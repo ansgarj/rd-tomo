@@ -15,6 +15,7 @@ import json
 
 from .utils import prompt_ftp_login, gunzip
 from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, ppp, resource
+from .config import Settings
 
 def extract_rnx_info(file_path):
     """
@@ -123,6 +124,7 @@ def fetch_swepos_files(
     start_time: datetime,
     end_time: datetime,
     output_dir: str|Path,
+    min_dur: int = None,
     dry_run: bool = False,
     fetch_nav: bool = False,
     max_workers: int = 10,
@@ -130,7 +132,8 @@ def fetch_swepos_files(
 ):
 
     # Log into FTP server
-    ftp, ftp_user, ftp_pass = prompt_ftp_login(server="ftp-sweposdata.lm.se", max_attempts=3, default_user="")
+    settings = Settings()
+    ftp, ftp_user, ftp_pass = prompt_ftp_login(server="ftp-sweposdata.lm.se", max_attempts=3, user=settings.SWEPOS_USERNAME, pw=settings.SWEPOS_PASSWORD)
 
     # Prepare output directory
     output_dir = Path(output_dir)
@@ -140,7 +143,9 @@ def fetch_swepos_files(
     files_to_download = []
     current = start_time.replace(minute=0, second=0, microsecond=0)
 
-    while current <= end_time:
+    file_count = 0
+    while current <= end_time or file_count < min_dur:
+        file_count += 1
         year = current.strftime("%Y")
         day_of_year = current.strftime("%j")
         hour = current.strftime("%H")
@@ -223,7 +228,9 @@ def fetch_swepos_files(
                     decompressed_path = gunzip(output_dir / filename)
                     decompressed_path = (output_dir / filename).with_suffix('')  # removes .gz
                     if decompressed_path.suffix == '.crx':
-                        crx2rnx(decompressed_path)
+                        rnx_path = crx2rnx(decompressed_path)
+                        if not rnx_path.is_file():
+                            raise FileNotFoundError(f"Unpacking of Hatanaka compressed .crx file {decompressed_path} unsuccessful")
                 else:
                     tqdm.write(f"Failed: {filename}")
                     failed += 1
@@ -404,7 +411,12 @@ def read_pos_file(filepath):
     
     return coords, q, gpst
 
-def read_out_file(file_path: str|Path, verbose: bool = False):
+def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[tuple[float, float, float],
+                                                                       np.ndarray,
+                                                                       float,
+                                                                       tuple[float, float, float],
+                                                                       tuple[float, float, float]
+                                                                    ]:
     x, y, z = [], [], []
     err, ts = [], []
     x_err, y_err, z_err = [], [], []
@@ -465,12 +477,18 @@ def read_out_file(file_path: str|Path, verbose: bool = False):
     # Convergence time and total time
     conv_time = ts[idx] - ts[0]
     total_time = ts[-1] - ts[0]
-    if verbose:
-        print(f"PPP solution converged after {conv_time} (total duration: {total_time})")
-        lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(x_mean, y_mean, z_mean)
-        print(f"Position: lat={lat} ({y_std:.3f} m), lon={lon} ({x_std:.3f} m), h={h} ({z_std:.3f} m)")
 
-    return (x_mean, y_mean, z_mean), (x_std, y_std, z_std), (x_res, y_res, z_res), 
+    # Geodetic coordinates
+    lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(x_mean, y_mean, z_mean)
+    if verbose or Settings().VERBOSE:
+        print(f"PPP solution converged after {conv_time}, average taken over {total_time - conv_time}")
+        print(f"Position: lat={lat}, lon={lon}, h={h:.3f}")
+
+    rotation = np.array([[-np.sin(lon), np.cos(lon), 0],
+                         [-np.cos(lon)*np.sin(lat), -np.sin(lon)*np.sin(lat), np.cos(lat)],
+                         [np.cos(lon)*np.cos(lat), np.sin(lon)*np.cos(lat), np.sin(lat)]])
+
+    return (x_mean, y_mean, z_mean), rotation,  idx, (x_std, y_std, z_std), (x_res, y_res, z_res)
 
 def detect_convergence_and_mean(x_vals, y_vals, z_vals, x_err, y_err, z_err, err, window_size=100, threshold_percentile=10, verbose: bool = False):
     # Residuals from full-series mean
@@ -571,25 +589,30 @@ def update_rinex_position(file_path, new_coords):
 
 # Orchestrating functions
 def fetch_swepos(
-        filepath: str|Path,
+        drone_ubx: str|Path,
         stations_path: str|Path = None,
         max_downloads: int = 10,
         max_retries: int = 3,
         output_dir: str|Path = None,
+        min_dur: int  = None,
         dry: bool = False,
-        cont: bool = False
+        fetch_nav: bool = False,
+        cont: bool = False,
     ):
-    filepath = Path(filepath)
+    drone_ubx = Path(drone_ubx)
     if output_dir is None:
-        output_dir = filepath.parent
+        output_dir = drone_ubx.parent
     else:
         output_dir = Path(output_dir)
     
-    sbs_path = filepath.with_suffix(".sbs")
-    nav_path = filepath.with_suffix(".nav")
-    obs_path = filepath.with_suffix(".obs")
-    if not obs_path.exists() or not nav_path.exists() or not sbs_path.exists():
-        ubx2rnx(filepath)
+    if drone_ubx.suffix == '.obs':
+        obs_path = drone_ubx
+    else:
+        sbs_path = drone_ubx.with_suffix(".sbs")
+        nav_path = drone_ubx.with_suffix(".nav")
+        obs_path = drone_ubx.with_suffix(".obs")
+        if not obs_path.exists() or not nav_path.exists() or not sbs_path.exists():
+            ubx2rnx(drone_ubx)
     tmp_dir = output_dir / "TMP"
    
     if not cont:
@@ -606,7 +629,7 @@ def fetch_swepos(
 
         lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(*pos)
         if pos:
-            print(f"Approximate location: (lat: {lat}, lon: {lon}, h: {h})")
+            print(f"Approximate location: (lat: {lat}, lon: {lon}, h: {h:.3})")
         else:
             print("No valid position could be extracted from the file.")
 
@@ -627,6 +650,7 @@ def fetch_swepos(
             print("Failed to locate nearest station.")
             return
 
+        print("Logging into Swepos network ...", flush=True)
         failed = fetch_swepos_files(
             station_code=station_code,
             start_time=start_utc,
@@ -634,13 +658,15 @@ def fetch_swepos(
             output_dir=tmp_dir,
             max_workers=max_downloads,
             max_retries=max_retries,
-            dry_run=dry
+            min_dur=min_dur,
+            dry_run=dry,
+            fetch_nav=fetch_nav
         )
         if failed:
             raise FileNotFoundError("Download from Swepos failed.")
 
     if tmp_dir.exists():
-        merge_swepos_rinex(tmp_dir)
+        merged_obs, merged_nav = merge_swepos_rinex(tmp_dir)
 
         print("Cleaning up ...", end=" ", flush=True)
         for file in tmp_dir.iterdir():
@@ -649,6 +675,13 @@ def fetch_swepos(
         tmp_dir.rmdir()
         print("done.")
 
+        if not merged_obs.is_file():
+            raise RuntimeError("Merging of downloaded observation files failed")
+        if not merged_nav is None and not merged_nav.is_file():
+            raise RuntimeError("Merging of downloaded navigation files failed")
+        return merged_obs, merged_nav
+    return None, None
+    
 def station_ppp(
         data_dir: str|Path,
         atx_path: str|Path = None,
@@ -710,21 +743,22 @@ def station_ppp(
         raise FileNotFoundError(f"Cannot find generated out file: {out_path}")
     
     # Extract position
-    pos, _, _ = read_out_file(out_path, verbose=True)
+    pos, rotation, _, _, _ = read_out_file(out_path, verbose=True)
 
-    lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(*approx_pos)
-    print(f"Old header position: lat={lat}, lon={lon}, height={h}")
-    distance = math.sqrt((pos[0] - approx_pos[0])**2 + (pos[1] - approx_pos[1])**2 + (pos[2] - approx_pos[2])**2)
-    print(f"Distance: {distance} m")
+    diff = rotation @ [pos[0] - approx_pos[0], pos[1] - approx_pos[1], pos[2] - approx_pos[2]]
+    distance = math.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
+    print(f"Distance: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
     print()
     if header:
         update_rinex_position(obs_path, pos)
     lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(*pos)
+    settings = Settings()
     mocoref = {
-        "lat": lat,
-        "lon": lon,
-        "h": h
+        settings.MOCOREF_LATITUDE: lat,
+        settings.MOCOREF_LONGITUDE: lon,
+        settings.MOCOREF_HEIGHT: h
     }
     with open(output_dir / "mocoref.json", 'w') as f:
         json.dump(mocoref, f, indent=4)
+    return distance
 

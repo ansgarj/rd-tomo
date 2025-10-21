@@ -94,356 +94,59 @@ def verbose() -> None:
         print("VERBOSE toggled ON")
     st.save()
 
-@click.group()
-def set() -> None:
-    """Set value for settings"""
-    pass
-
-@set.command()
-@click.argument("value", required=False)
-def MOCOREF_LONGITUDE(value) -> None:
-    """Update MOCOREF_LONGITUDE"""
-    st = Settings()
-    print(f"Current value: {st.MOCOREF_LONGITUDE}")
-    if value is None:
-        value = input("Enter new value: ")
-    st.MOCOREF_LONGITUDE = value
-    st.save()
-
-@set.command()
-@click.argument("value", required=False)
-def MOCOREF_LATITUDE(value) -> None:
-    """Update MOCOREF_LATITUDE"""
-    st = Settings()
-    print(f"Current value: {st.MOCOREF_LATITUDE}")
-    if value is None:
-        value = input("Enter new value: ")
-    st.MOCOREF_LATITUDE = value
-    st.save()
-
-@set.command()
-@click.argument("value", required=False)
-def MOCOREF_HEIGHT(value) -> None:
-    """Update MOCOREF_HEIGHT"""
-    st = Settings()
-    print(f"Current value: {st.MOCOREF_HEIGHT}")
-    if value is None:
-        value = input("Enter new value: ")
-    st.MOCOREF_HEIGHT = value
-    st.save()
-
-@set.command()
-@click.argument("value", required=False)
-def MOCOREF_ANTENNA(value) -> None:
-    """Update MOCOREF_ANTEANNA (antenna height)"""
-    st = Settings()
-    print(f"Current value: {st.MOCOREF_ANTENNA}")
-    if value is None:
-        value = input("Enter new value: ")
-    st.MOCOREF_ANTENNA = value
-    st.save()
-
-@set.command()
-@click.argument("value", required=False)
-def DATA_DIRS(value) -> None:
-    """Update DATA_DIRS (path where data directories are generated)"""
-    st = Settings()
-    print(f"Current value: {st.DATA_DIRS}")
-    if value is None:
-        value = input("Enter new value: ")
-    st.DATA_DIRS = value
-    st.save()
-
-@set.command()
-@click.argument("value", required=False)
-def PROCESSING_DIRS(value) -> None:
-    """Update PROCESSING_DIRS (path where processing directories are generated)"""
-    st = Settings()
-    print(f"Current value: {st.PROCESSING_DIRS}")
-    if value is None:
-        value = input("Enter new value: ")
-    st.PROCESSING_DIRS = value
-    st.save()
-
-@set.command()
-@click.argument("value", required=False)
-def TOMO_DIRS(value) -> None:
-    """Update TOMO_DIRS (path where tomogram directories are generated)"""
-    st = Settings()
-    print(f"Current value: {st.TOMO_DIRS}")
-    if value is None:
-        value = input("Enter new value: ")
-    st.TOMO_DIRS = value
-    st.save()
-
-@set.command()
-@click.argument("path", required=False)
-def RTKP_CONFIG(path) -> None:
-    """Update RTKP config path"""
-    st = Settings()
-    print(f"Current value: {st.RTKP_CONFIG}")
-    if path is None:
-        path = Path(input("Enter new value: "))
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(f"File {path} not found.")
-    st.RTKP_CONFIG = path
-    st.save()
-
-@set.command()
-@click.argument("username", required=False)
-def SWEPOS_USERNAME(username) -> None:
-    """Update SWEPOS USERNAME"""
-    st = Settings()
-    print(f"Current username: {st.SWEPOS_USERNAME}")
-    if username is None:
-        username = input("Enter username: ")
-    st.SWEPOS_USERNAME = username
-    st.save()
-
-@set.command()
-@click.argument("password", required=False)
-def SWEPOS_PASSWORD(password) -> None:
-    """Update SWEPOS PASSWORD"""
-    st = Settings()
-    if password is None:
-        password = getpass("Enter password (note: this will be saved in settings.json UNENCRYPTED): ")
-    st.SWEPOS_PASSWORD = password
-    st.save()
-
-@set.command()
-def DEFAULT_POC() -> None:
-    """Update default POC (phase offset center) for receiver antennas"""
-    st = Settings()
-    print(f"Current value:")
-    poc = json.dumps(st.DEFAULT_POC, indent=4)
-    poc = "\n".join("    " + line for line in poc.splitlines())
-    print(poc)
-    value = {
-        1: read_three_numbers("Frequency 1"),
-        2: read_three_numbers("Frequency 2"),
-        3: read_three_numbers("Frequency 3"),
-        4: read_three_numbers("Frequency 4"),
-        5: read_three_numbers("Frequency 5")
-    }
-    st.DEFAULT_POC = value
-    st.save()
-
-@set.command()
-@click.argument("path", required=False)
-def SATELLITES(path) -> None:
-    """Update satellites .atx path"""
-    st = Settings()
-    print(f"Current value: {st.SATELLITES}")
-    if path is None:
-        path = Path(input("Enter new value: "))
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(f"File {path} not found.")
-    if not verify_atx(path):
-        raise ValueError(f"File {path} is not a valid ATX file")
-    st.SATELLITES = path
-    st.save()
-
-@click.group()
-def clear() -> None:
-    """Clear Settings value"""
-    pass
-
-@clear.command()
-def RTKP_CONFIG() -> None:
-    """Clear RTKP config file path"""
-    st = Settings()
-    st.RTKP_CONFIG = None
-    st.save()
-
-@clear.command()
-def DATA_DIRS() -> None:
-    """Clear DATA_DIRS (path where data directories are generated, defaults to $HOME/Radar/Data)"""
-    st = Settings()
-    st.DATA_DIRS = None
-    st.save()
-
-@clear.command()
-def PROCESSING_DIRS() -> None:
-    """Clear PROCESSING_DIRS (path where processing directories are generated, defaults to $HOME/Radar/Processing)"""
-    st = Settings()
-    st.PROCESSING_DIRS = None
-    st.save()
-
-@clear.command()
-def TOMO_DIRS() -> None:
-    """Clear TOMO_DIRS (path where tomogram directories are generated, defaults to $HOME/Radar/Tomograms)"""
-    st = Settings()
-    st.TOMO_DIRS = None
-    st.save()
-
-@clear.command()
-def SWEPOS_USERNAME():
-    """Clear Swepos username"""
-    st = Settings()
-    st.SWEPOS_USERNAME = None
-    st.save()
-
-@clear.command()
-def SWEPOS_PASSWORD():
-    """Clear Swepos password"""
-    st = Settings()
-    st.SWEPOS_PASSWORD = None
-    st.save()
-
-@clear.command()
-def SATELLITES():
-    """Clear satellite ATX file"""
-    st = Settings()
-    st.SATELLITES = None
-    st.save()
-
-@click.group()
-def add() -> None:
-    """Add files or folders to TomoSAR"""
-    pass
-
-@add.command()
-@click.argument("paths", nargs=-1)
-def DEM(paths) -> None:
-    """Add DEM files or folders containing DEMs"""
-    st = Settings()
-    if not paths:
-        paths = input("Enter path(s): ").split()
-    for p in paths:
-        path = Path(p)
-        if not path.exists():
-            raise FileNotFoundError(f"{"File" if path.is_file() else "Folder"} not found: {path}")
-        if path.is_file() and not path.suffix in (".tif, .tiff"):
-            raise ValueError(f"File {path} is not a GeoTIFF file.")
-        st.DEMS.append(path.resolve())
-    st.save()
-
-@add.command()
-@click.argument("paths", nargs=-1)
-def CANOPY(paths) -> None:
-    """Add CANOPY files or folders containing CANOPIES"""
-    st = Settings()
-    if not paths:
-        paths = input("Enter path(s): ").split()
-    for p in paths:
-        path = Path(p)
-        if not path.exists():
-            raise FileNotFoundError(f"{"File" if path.is_file() else "Folder"} not found: {path}")
-        if path.is_file() and not path.suffix in (".tif, .tiff"):
-            raise ValueError(f"File {path} is not a GeoTIFF file.")
-        st.CANOPIES.append(path.resolve())
-    st.save()
-
-@add.command()
-@click.argument("paths", nargs=-1)
-def MASK(paths) -> None:
-    """Add MASK files or folders containing MASKS"""
-    st = Settings()
-    if not paths:
-        paths = input("Enter path(s): ").split()
-    for p in paths:
-        path = Path(p)
-        if not path.exists():
-            raise FileNotFoundError(f"{"File" if path.is_file() else "Folder"} not found: {path}")
-        if path.is_file() and not path.suffix in (".shp"):
-            raise ValueError(f"File {path} is not a shape file.")
-        st.MASKS.append(path.resolve())
-    st.save()
-
-@add.command()
-@click.argument("antenna_type", required=False)
-@click.argument("path", required=False)
-@click.option("--radome", help="Radome type", default="NONE")
-def RECEIVER(antenna_type: str, path: str, radome: str = "NONE") -> None:
-    """Add an antenna file for a receiver"""
-    if antenna_type == "SATELLITES":
-        raise RuntimeError("Use tomosar set SATELLITES to set the satellites antenna file")
-    st = Settings()
-    if not antenna_type:
-        antenna_type = input("Enter antenna type: ")
-    if not path:
-        path = input("Enter path: ")
-    path = Path(path)
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(f"File not found: {path}")
-    if not verify_atx(path):
-        raise ValueError(f"File {path} is not a valid ATX file")
-    if antenna_type in st.ANTENNAS and radome in st.ANTENNAS[antenna_type]:
-        warn(f"Path {st.ANTENNAS[antenna_type]} for receiver ID {antenna_type} {radome} overwritten.")
-    elif antenna_type not in st.ANTENNAS:
-        st.ANTENNAS[antenna_type] = {}    
-    st.ANTENNAS[antenna_type][radome] = path.resolve()
-    st.save()
-
-@click.group()
-def remove() -> None:
-    """Remove files or folders from TomoSAR"""
-    pass
-
-@remove.command()
-@click.argument("paths", nargs=-1)
-def DEM(paths) -> None:
-    """Remove DEM path"""
-    st = Settings()
-    if not paths:
-        print("Current DEMS:")
-        for dem in st.DEMS:
-            print("\t" + dem)
-        print()
-        paths = input("Enter path(s) to remove: ").split()
-    paths = [Path(path).resolve() for path in paths]
-    old_dems = st.DEMS
-    st.DEMS = [dem for dem in old_dems if not dem in paths]
-    st.save()
-
-@remove.command()
-@click.argument("paths", nargs=-1)
-def CANOPY(paths) -> None:
-    """Remove CANOPY path"""
-    st = Settings()
-    if not paths:
-        print("Current CANOPIES:")
-        for canopy in st.CANOPIES:
-            print("\t" + canopy)
-        print()
-        paths = input("Enter path(s) to remove: ").split()
-    paths = [Path(path).resolve() for path in paths]
-    old_canopies = st.CANOPIES
-    st.CANOPIES = [canopy for canopy in old_canopies if not canopy in paths]
-    st.save()
-
-@remove.command()
-@click.argument("paths", nargs=-1)
-def MASK(paths) -> None:
-    """Remove MASK path"""
-    st = Settings()
-    if not paths:
-        print("Current MASKS:")
-        for mask in st.MASKS:
-            print("\t" + mask)
-        print()
-        paths = input("Enter path(s) to remove: ").split()
-    paths = [Path(path).resolve() for path in paths]
-    old_masks = st.MASKS
-    st.MASKS = [mask for mask in old_masks if not mask in paths]
-    st.save()
-
-@remove.command()
-@click.argument("antenna_type", required=False)
-@click.argument("path", required=False)
-@click.option("--radome", help="Radome type", default="NONE")
-def RECEIVER(antenna_type: str, path: str, radome: str = "NONE") -> None:
-    """Remove RECEIVER ID for specified radome (default: NONE)"""
-    st = Settings()
-    if antenna_type == "SATELLITES":
-        raise RuntimeError("Use tomosar clear SATELLITES to remove the satellites antenna file")
-    if not antenna_type:
-        antenna_type = input("Enter antenna type: ")
-    if not path:
-        path = input("Enter path: ")
-    if antenna_type in st.RECEIVERS:
-        st.RECEIVERS[antenna_type].pop(radome, None)
-        if not st.RECEIVERS[antenna_type]:
-            st.RECEIVERS.pop(antenna_type, None)
-    st.save()
+@click.command()
+@click.argument("key")
+@click.argument("value")
+def set(key, value) -> None:
+    """Set value for settings. Valid keys are:
+    RTKP_CONFIG, DATA_DIRS, PROCESSING_DIRS, TOMO_DIRS, SWEPOS_USERNAME, SWEPOS_PASSWORD, MOCOREF_LONGITUDE, MOCOREF_LATITUDE, MOCOREF_HEIGHT, MOCOREF_ANTENNA"""
     
+    valid_keys = ["RTKP_CONFIG", "DATA_DIRS", "PROCESSING_DIRS", "TOMO_DIRS", "SWEPOS_USERNAME", "SWEPOS_PASSWORD",
+                  "MOCOREF_LONGITUDE", "MOCOREF_LATITUDE", "MOCOREF_HEIGHT", "MOCOREF_ANTENNA"]
+    settings = Settings()
+    if not key in valid_keys:
+        raise RuntimeError(f"Invalid key {key}. Valid keys: {valid_keys}")
+    
+    settings.set(key, value)
+    settings.save()
+
+@click.command()
+@click.argument("keys", nargs=-1)
+def clear(keys) -> None:
+    """Clear Settings value. Valid keys are:
+    RTKP_CONFIG, DATA_DIRS, PROCESSING_DIRS, TOMO_DIRS, SWEPOS_USERNAME, SWEPOS_PASSWORD, MOCOREF_LONGITUDE, MOCOREF_LATITUDE, MOCOREF_HEIGHT, MOCOREF_ANTENNA, DEMS, CANOPIES, MASKS"""
+    
+    valid_keys = ["RTKP_CONFIG", "DATA_DIRS", "PROCESSING_DIRS", "TOMO_DIRS", "SWEPOS_USERNAME", "SWEPOS_PASSWORD",
+                  "SATELLITES", "RECEIVERS", "MOCOREF_LONGITUDE", "MOCOREF_LATITUDE", "MOCOREF_HEIGHT", "MOCOREF_ANTENNA",
+                  "DEMS", "CANOPIES", "MASKS"]
+    settings = Settings()
+    default = Settings().reset()
+    for key in keys:
+        if not key in valid_keys:
+            warn(f"Key {key} cannot be cleared")
+            continue
+        settings.set(key, default.get(key))
+        settings.save()
+
+@click.command()
+@click.argument("key")
+@click.argument("files", nargs=-1)
+@click.option("--antenna", help="Antenna type", default=None)
+@click.option("--radome", help="Radome type", default="NONE")
+def add(key, files, antenna: str|None, radome: str) -> None:
+    """Add files or folders to TomoSAR. Valid keys are:
+    DEM, DEMS, CANOPY, CANOPIES, MASK, MASKS, RECEIVER"""
+    settings = Settings()
+    settings.add(key, files, antenna=antenna, radome=radome)
+    settings.save()
+
+@click.command()
+@click.argument("key")
+@click.argument("files", nargs=-1)
+@click.option("--antenna", help="Antenna type", default=None)
+@click.option("--radome", help="Radome type", default="NONE")
+def remove(key, files, antenna: str|None, radome: str) -> None:
+    """Remove files or folders from TomoSAR"""
+    settings = Settings()
+    settings.remove(key, files, antenna=antenna, radome=radome)
+    settings.save()

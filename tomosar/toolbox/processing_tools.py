@@ -4,7 +4,7 @@ import os
 import time as Time
 import datetime
 
-from ..gnss import fetch_swepos, station_ppp
+from ..gnss import fetch_swepos as run_fetch_swepos, station_ppp as run_station_ppp
 from ..trackfinding import trackfinder as run_trackfinder
 from .. import ImageInfo, TomoScenes
 from ..utils import interactive_console
@@ -19,32 +19,33 @@ from ..forging import tomoforge
 @click.option("-d", "--dry", is_flag=True, help="Dry run without downloads")
 @click.option("--cont", is_flag=True, help="Continue run after downloads complete")
 @click.option("-n","--nav", is_flag=True, help="Also fetch nav files.")
-def swepos(filepath, stations, downloads, attempts, output, dry, cont, nav) -> None:
+def fetch_swepos(filepath, stations, downloads, attempts, output, dry, cont, nav) -> None:
     """Extract GNSS info and find nearest SWEPOS station.
     Then download files into output directory."""
-    fetch_swepos(
+    run_fetch_swepos(
         filepath=filepath,
         stations_path=stations,
         max_downloads=downloads,
         max_retries=attempts,
         dry=dry,
         output_dir=output,
+        fetch_nav=nav,
         cont=cont
     )
 
 @click.command()
 @click.argument("data_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the antenna .atx file")
+@click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
 @click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
 @click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
 @click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
 @click.option("-o", "--output", type=click.Path(path_type=Path), default=None, help="Output directory for SWEPOS rinex files")
 @click.option("-d", "--dry", is_flag=True, help="Dry run without downloads")
 @click.option("--cont", is_flag=True, help="Continue run after downloads complete")
-@click.option("-x", "--header", is_flag=True, default=True, help="Modify OBS file header with new position (default: True)")
-def ppp(data_dir, atx, receiver, downloads, attempts, output, dry, cont, header) -> None:
+@click.option("-x", "--no-header", 'header', is_flag=True, default=True, flag_value=False, help="Do not fodify OBS file header with new position.")
+def station_ppp(data_dir, atx, receiver, downloads, attempts, output, dry, cont, header) -> None:
     """Extract GNSS info and find nearest SWEPOS station."""
-    station_ppp(
+    run_station_ppp(
         data_dir=data_dir,
         atx_path=atx,
         antrec_path=receiver,
