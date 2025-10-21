@@ -12,7 +12,7 @@ keywords = ["SAR", "tomographic", "tomogram", "Radaz", "RD350", "radar", "microw
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "numpy (>=2.3.3,<3.0.0)",
     "pandas (>=2.3.3,<3.0.0)",

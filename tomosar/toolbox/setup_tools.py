@@ -17,7 +17,7 @@ def warm_cache():
     print(f"__pycache__ warmed for {PACKAGE_PATH}")
 
 def pyproject_changed() -> bool:
-    """Checks wheteher pyproject.toml was changed in the last merge. Falls back to last commit if no merge found."""
+    """Checks wheteher pyproject.toml was changed in the last merge."""
     try:
         # Run the git diff-tree command
         result = run(["git", "diff-tree", "-r", "--name-only", "--no-commit-id", "ORIG_HEAD", "HEAD"])
@@ -26,18 +26,8 @@ def pyproject_changed() -> bool:
         changed_files = result.stdout.splitlines()
         return "pyproject.toml" in changed_files
     
-    except RuntimeError as e:
-        try:
-            # Run the git diff-tree command against last commit instead
-            result = run(["git", "diff-tree", "-r", "--name-only", "--no-commit-id", "HEAD~1", "HEAD"])
-
-            # Check if pyproject.toml is in the output
-            changed_files = result.stdout.splitlines()
-            return "pyproject.toml" in changed_files
-        
-        except RuntimeError as e:
-            warn(e)
-            return False
+    except RuntimeError:
+        return False
 
 def parse_version_string(version_str: str):
     """

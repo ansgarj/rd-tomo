@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.4] - 2025-10-21
+
+### Changed
+- Updated `pyproject.toml` to indicate that at least Python 3.10 is needed 
+
+## Fixed
+- Fixed bug in `tomosar trackfinder` that was caused by a leftover option from v0.0.1 and which caused a fatal error
+- Fixed bug in `tomosar trackfinder` that caused it not to write a radar_logger_dat-[...].inf file by default
+- Fixed bug in `tomosar setup` that caused it to warn that the `pyproject.toml` file had changed even on a fresh clone if the last commit pushed to the online repo contained a change.
+
 ## [0.0.3] - 2025-10-21
 
 ### Added

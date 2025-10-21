@@ -81,11 +81,7 @@ The `tomosar` module relies on some 3rd party software for GNSS processing. It i
 ## Usage
 The `tomosar` _module_ is a work-in-progress to provide a one-stop toolbox for our tomographic SAR needs. Once installed it can be imported into Python by running `import tomosar`, or you can select submodules or objects as usual  in Python. Currently, the only available documentation is the one present in the code, _but I plan to add separate documentation later._
 
-The CLI tools are intended to provide a toolbox for the most common or predicted needs, the idea being that unless you are working on your own project with something not integrated into the CLI tools, you can use the module directly from the terminal by running a command without having to enter into Python and importing the module.  All tools can be called with `--help` for some basic syntax and `tomosar help` prints a general help overview:
-1. `tomosar` which is used for setup tools, settings, info and Python terminal entry points;
-2. `tomoprocess` which is used for all steps in the processing chain;
-3. `tomoview` which is used to launch GUI viewers for [Tomogram Directories](#tomogram-directories);
-4. `tomotest` which contains various performance tests.
+The CLI tools are intended to provide a toolbox for the most common or predicted needs, the idea being that unless you are working on your own project with something not integrated into the CLI tools, you can use the module directly from the terminal by running a command without having to enter into Python and importing the module.  All tools are accessed as subcommands of `tomosar` and can be called with `--help` for some basic syntax: `tomosar --help` provides syntax help and `tomosar manual` prints a general help overview.
 
 **NOTE**: many of these tools are not yet fully implemented.
 

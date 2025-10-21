@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 import csv
 import struct
 import numpy as np
-import subprocess
 
 from ..gnss import extract_rnx_info, read_out_file, read_pos_file
 from ..binaries import rnx2rtkp, resource

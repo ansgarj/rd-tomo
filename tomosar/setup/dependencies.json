@@ -8,15 +8,6 @@
 			}
 		}
 	},
-	"pip": {
-		"Usage": "Installation",
-		"Source": "RUN: python -m ensurepip --default-pip",
-		"Used_by": {
-			"tools": {
-				"tomosar": ["setup"]
-			}
-		}
-	},
 	"convbin": {
 		"Usage": "GNSS binary format conversion to RINEX",
 		"Source": "https://github.com/rinex20/RTKLIB-demo5",
@@ -25,7 +16,7 @@
 				"tomosar.fetch_swepos()"
 			],
 			"tools": {
-				"tomoprocess": ["init", "pre", "swepos"]
+				"tomosar": ["init", "fetch-swepos"]
 			}
 		}
 	},
@@ -34,10 +25,10 @@
 		"Source": "https://github.com/rinex20/RTKLIB-demo5",
 		"Used_by": {
 			"module": [
-				"tomosar.fetch_swepos()"
+				"N/A"
 			],
 			"tools": {
-				"tomoprocess": ["init", "pre"]
+				"tomosar": ["init"]
 			}
 		}
 	},
@@ -50,7 +41,7 @@
 				"tomosar.fetch_swepos()"
     		],
 			"tools": {
-				"tomoprocess": ["init", "pre", "swepos"]
+				"tomoprocess": ["init", "fetch-swepos"]
 			}
 		}
     },
@@ -63,7 +54,7 @@
 				"tomosar.fetch_swepos()"
     		],
 			"tools": {
-				"tomoprocess": ["init", "pre", "swepos"]
+				"tomoprocess": ["init", "fetch-swepos"]
 			}
 		}
     },
@@ -75,7 +66,7 @@
 				"tomosar.station_ppp()"
     		],
 			"tools": {
-				"tomoprocess": ["init", "pre", "ppp"]
+				"tomoprocess": ["init", "station-ppp"]
 			}
 		}
 	},
@@ -84,10 +75,10 @@
 		"Source": "Radaz",
 		"Used_by": {
 			"module": [
-				"NA"
+				"N/A"
 			],
 			"tools": {
-				"NA": []
+				"N/A": []
 			}
 		}
 	},
@@ -99,7 +90,7 @@
 				"tomosar.build_vrt"
 			],
 			"tools": {
-				"tomoprocess": ["slice"]
+				"tomosar": ["slice"]
 			}
 		}
 	},
@@ -111,7 +102,7 @@
 				"tomosar.generate_raster"
 			],
 			"tools": {
-				"tomoprocess": ["slice"]
+				"tomosar": ["slice"]
 			}
 		}
 	}
