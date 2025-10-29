@@ -1,6 +1,6 @@
 # General CLI help
 
-All CLI tools in the **TomoSAR** toolbox are accessed as subcommands of the `tomosar` command which is installed by `pip` when you install the `tomosar` module.  Run `tomosar manual` to print this manual. You can also add `--help` to `tomosar` or any of the subcommands for basic syntax.
+All CLI tools in the **TomoSAR** toolbox are accessed as subcommands of the `tomosar` command which is installed by `pip` when you install the `tomosar` module.  Run `tomosar manual` to print this manual and `tomosar changelog` to print the changelog. You can also add `--help` to `tomosar` or any of the subcommands for basic syntax.
 
 ## `setup`
 Running `tomosar setup` ensures that your current installation is up to date. It makes sure all Git hooks are installed, checks if the `pyproject.toml` file was changed in the last merge (or last commit if no merge exists) and warns you to reinstall via `pip` if it was, updates the version file, checks if all required binaries can be found in the `PATH` and pre-warms the Python cache.
@@ -33,8 +33,11 @@ Running `tomosar station-ppp` on a GNSS base station RINEX observation file will
 
 **Note**: this function, while operational, is currently buggy and does not deliver good results. When fixed it can be used as a fallback if we lack an "exact" position of the GNSS base station.
 
+## `mocoref`
+Running `tomosar mocoref` on a data file (CSV, JSON or LLH) generates a `mocoref.moco` file. For a CSV file it defaults to the first line, but this can be changed with `--line`, and reads columns with names matching the names specified in the settings. A JSON file is assumed to contain a dict with the keys specified in the settings. A LLH log is assumed to have no header and to have columns matching the LLH log from the Emlid Reach RS3. 
+
 ## `load`
-Running `tomosar load` loads a single _Tomogram Directory_ or multiple _Tomogram Directories_ into a `TomoScenes` object, and then opens an interactive Python console with the `TomoScenes` object stored under `tomos`. It can be used as an entry point instead of having to manually import and run inside Python where path auto-completion may not work. 
+Running `tomosar load` loads a single _Tomogram Directory_ or multiple _Tomogram Directories_ into a `TomoScenes` object, and then opens an interactive Python console with the `TomoScenes` object stored under `tomos`. It can be used as an entry point instead of having to manually import and run inside Python where path auto-completion may not work.  Running `tomosar load --info` instead extracts and prints basic information without requiring the entire directory structure to be loaded, and then exits.
 
 ## `sliceinfo`
 Running `tomosar sliceinfo` scans a directory for slice files and collects them into a `SliceInfo` object, and then opens an interactive Python console with the `SliceInfo` object stored under `slices`. It can be used as an entry point instead of having to manually import and run inside Python where path auto-completion may not work. 
@@ -51,5 +54,4 @@ The `tomosar test` subcommand contains additional subcommands that can be used t
 6. `tomosar plan` \[**NOT IMPLEMENTED**\] interactively models a _planned flight_ to allow validation of ideal SAR parameters across different tomograms (**Note**: this does not take into account flight instabilities that can occur during the actual flight).
 7. `tomosar test station-ppp` \[**NOT IMPLEMENTED**\] tests base station PPP performance against ground truth as given in a `mocoref.moco` file.
 8. `tomosar fetch-data` \[**NOT IMPLEMENTED**\] fetches the **most recent** _drone data_ and generates a _Data Directory_ inside the folder pointed to by the `DATA_DIRS` setting (**default**: `$HOME/Radar/Data`)
-9. `tomosar generate-mocoref` \[**NOT IMPLEMENTED**\] generates a correctly formatted `mocoref.moco` file from a CSV file,  reading the columns named `Longitude`, `Latitude`, `Ellipsoidal height` and `Antenna height` (default column names from _Emlid Reach_, can be changed with `tomosar set MOCOREF_LATITUDE`, `MOCOREF_LONGITUDE`, `MOCOREF_HEIGHT` and `MOCOREF_ANTENNA`) for mocoref data. If multiple lines are present in the CSV files it will by default read the first line (modify by `--line X`).
-10. `tomoprocess analysis` \[**NOT IMPLEMENTED**\] analyzes the spiral flights and models them. Used to verify _idealized flight_ vs. _planned flight_, and to inspect _realized flight_ parameters, including anisotropies from flight instabilities. Can provide optimal processing parameters for `tomo`/`slice`. 
+9. `tomoprocess analysis` \[**NOT IMPLEMENTED**\] analyzes the spiral flights and models them. Used to verify _idealized flight_ vs. _planned flight_, and to inspect _realized flight_ parameters, including anisotropies from flight instabilities. Can provide optimal processing parameters for `tomo`/`slice`. 

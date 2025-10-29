@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 from collections import defaultdict
+from importlib.resources import path as importpath
 
 # Project and package paths
 PACKAGE_PATH = Path(__file__).resolve().parent
@@ -161,11 +162,14 @@ class Settings:
     
     @property
     def RTKP_CONFIG(self) -> Path:
-        return Path(self.data["RTKP_CONFIG"])
+        path = self.data.get("RTKP_CONFIG", None)
+        if path is None:
+            return None
+        return Path(path)
     
     @RTKP_CONFIG.setter
-    def RTKP_CONFIG(self, value):
-        if not isinstance(value, str):
+    def RTKP_CONFIG(self, value: str|Path):
+        if not isinstance(value, (str, Path)):
             raise ValueError("The RTKP_CONFIG settings take a path-like string as value")
         path = Path(value)
         if not path.is_file():
@@ -179,16 +183,15 @@ class Settings:
         return dirs
     
     @DATA_DIRS.setter
-    def DATA_DIRS(self, value) -> None:
-        if not isinstance(value, str):
+    def DATA_DIRS(self, value: str|Path) -> None:
+        if not isinstance(value, (str, Path)):
             raise ValueError("The DATA_DIRS settings take a path-like string as value")
         path = Path(value)
         if path.is_file():
             raise FileExistsError(f"The path {value} points to a file")
         path.mkdir(parents=True, exist_ok=True)
         self.data["DATA_DIRS"] = str(path.resolve())
-        
-    
+         
     @property
     def PROCESSING_DIRS(self) -> Path:
         dirs = self.data["PROCESSING_DIRS"]
@@ -196,8 +199,8 @@ class Settings:
         return dirs
     
     @PROCESSING_DIRS.setter
-    def PROCESSING_DIRS(self, value) -> None:
-        if not isinstance(value, str):
+    def PROCESSING_DIRS(self, value: str|Path) -> None:
+        if not isinstance(value, (str, Path)):
             raise ValueError("The PROCESSING_DIRS settings take a path-like string as value")
         path = Path(value)
         if path.is_file():
@@ -212,8 +215,8 @@ class Settings:
         return dirs
     
     @TOMO_DIRS.setter
-    def TOMO_DIRS(self, value) -> None:
-        if not isinstance(value, str):
+    def TOMO_DIRS(self, value: str|Path) -> None:
+        if not isinstance(value, (str, Path)):
             raise ValueError("The TOMO_DIRS settings take a path-like string as value")
         path = Path(value)
         if path.is_file():
@@ -230,7 +233,7 @@ class Settings:
         return self.SWEPOS_LOGIN["USERNAME"]
     
     @SWEPOS_USERNAME.setter
-    def SWEPOS_USERNAME(self, value) -> None:
+    def SWEPOS_USERNAME(self, value: str) -> None:
         if not isinstance(value, str):
             raise ValueError("The SWEPOS_USERNAME setting takes a string as value")
         self.data["SWEPOS_LOGIN"]["USERNAME"] = value
@@ -240,10 +243,23 @@ class Settings:
         return self.SWEPOS_LOGIN["PASSWORD"]
     
     @SWEPOS_PASSWORD.setter
-    def SWEPOS_PASSWORD(self, value) -> None:
+    def SWEPOS_PASSWORD(self, value: str) -> None:
         if not isinstance(value, str):
             raise ValueError("The SWEPOS_PASSWORD setting takes a string as value")
         self.data["SWEPOS_LOGIN"]["PASSWORD"] = value
+
+    @property
+    def SWEPOS_COORDINATES(self) -> Path:
+        return self.data["SWEPOS_COORDINATES"]
+    
+    @SWEPOS_COORDINATES.setter
+    def SWEPOS_COORDINATES(self, value: str|Path) -> None:
+        if not isinstance(value, (str, Path)):
+            raise ValueError("The SWEPOS_COORDINATES settings take a path-like string as value")
+        path = Path(value)
+        if not path.is_file():
+            raise FileNotFoundError(f"The file {value} does not exist")
+        self.data["SWEPOS_COORDINATES"] = str(path.resolve())
 
     @property
     def FILES(self):
@@ -338,11 +354,14 @@ class Settings:
     
     @property
     def SATELLITES(self):
-        return self.ANTENNAS.get("SATELLITES", None)
+        path = self.ANTENNAS.get("SATELLITES", None)
+        if path is None:
+            return None
+        return Path(path)
     
     @SATELLITES.setter
-    def SATELLITES(self, value) -> None:
-        if not isinstance(value, str):
+    def SATELLITES(self, value: str|Path) -> None:
+        if not isinstance(value, (str, Path)):
             raise ValueError("The FILES : ANTENNAS : SATELLITES settings take a path-like string as value")
         path = Path(value)
         if not path.is_file():
@@ -375,7 +394,7 @@ class Settings:
         return self.data["RADAR"]
     
     def get(self, key: str):       
-        return self.getattr(key, None)
+        return getattr(self, key, None)
     
     def set(self, key: str, value):
         setattr(self, key, value)
@@ -391,13 +410,30 @@ class Settings:
     def reset(self) -> None:
         self.data = DEFAULT
 
+def internal_file(key: str) -> str:
+    valid_keys = ["SATELLITES", "CHCI83", "RTKP_CONFIG", "SWEPOS_COORDINATES"]
+    if key not in valid_keys:
+        raise RuntimeError(f"Invalid key {key} for internal file. Valid keys: {valid_keys}")
+    
+    match key:
+        case "RTKP_CONFIG":
+            filename = "m8t_5hz.conf"
+        case "SATELLITES":
+            filename = "igs20_2385.atx"
+        case "CHCI83":
+            filename = "CHCI83.atx"
+        case "SWEPOS_COORDINATES":
+            filename = "Koordinatlista_2025_10_14.csv"
+    with importpath('tomosar.data', filename) as resource_path:
+        return str(resource_path)
+    
 DEFAULT = {
     "VERBOSE": False,
     "MOCOREF_LONGITUDE": "Longitude",
     "MOCOREF_LATITUDE": "Latitude",
     "MOCOREF_HEIGHT": "Ellipsoidal height",
     "MOCOREF_ANTENNA": "Antenna height",
-    "RTKP_CONFIG": None,
+    "RTKP_CONFIG": internal_file("RTKP_CONFIG"),
     "DATA_DIRS": str(Path.home() / "Radar" / "Data"),
     "PROCESSING_DIRS": str(Path.home() / "Radar" / "Processing"),
     "TOMO_DIRS": str(Path.home() / "Radar" / "Tomograms"),
@@ -405,9 +441,13 @@ DEFAULT = {
         "USERNAME": None,
         "PASSWORD": None
     },
+    "SWEPOS_COORDINATES": internal_file("SWEPOS_COORDINATES"),
     "FILES": {
         "ANTENNAS": {
-            "SATELLITES": None,
+            "SATELLITES": internal_file("SATELLITES"),
+            "CHCI83": {
+                "NONE": internal_file("CHCI83")
+            }
         },
         "DEMS": [],
         "CANOPIES": [],

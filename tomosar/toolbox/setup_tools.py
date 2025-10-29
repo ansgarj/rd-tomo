@@ -1,23 +1,26 @@
 import click
 import compileall
 import shutil
-import re
-from pathlib import Path
 import subprocess
+from importlib.resources import path as importpath
 
 from .. import __version__
-from ..utils import warn
+from ..utils import warn, changed
 from ..binaries import check_required_binaries, run
-from ..config import PACKAGE_PATH, PROJECT_PATH, SETTINGS_PATH, save_default
+from ..config import PACKAGE_PATH, PROJECT_PATH, LOCAL, SETTINGS_PATH, save_default
 
-def warm_cache():
+def warm_cache() -> None:
     """Pre-warm __pycache__ by compiling all modules."""
 
     compileall.compile_dir(PACKAGE_PATH, force=True, quiet=1)
     print(f"__pycache__ warmed for {PACKAGE_PATH}")
 
+def install_changed(update: bool) -> bool:
+    """Checks if the local install.hash matches the current pyproject.toml"""
+    return changed(LOCAL / "install.hash", PROJECT_PATH / "pyproject.toml", generate_hash=update)
+
 def pyproject_changed() -> bool:
-    """Checks wheteher pyproject.toml was changed in the last merge."""
+    """Checks whether pyproject.toml was changed in the last merge."""
     try:
         # Run the git diff-tree command
         result = run(["git", "diff-tree", "-r", "--name-only", "--no-commit-id", "ORIG_HEAD", "HEAD"])
@@ -29,7 +32,7 @@ def pyproject_changed() -> bool:
     except RuntimeError:
         return False
 
-def parse_version_string(version_str: str):
+def parse_version_string(version_str: str) -> tuple[tuple[int, ...], str]:
     """
     Parses a complex version string into a tuple and extracts the commit hash.
     Example: '0.0.2.post1.dev0+g5ab868b42.d20251021'
@@ -60,7 +63,7 @@ def parse_version_string(version_str: str):
 
     return tuple(version_tuple), commit_id
 
-def update_version_file(version_str: str):
+def update_version_file(version_str: str) -> None:
     """
     Updates version.py with the new version string, version tuple, and commit ID.
     """
@@ -88,7 +91,7 @@ def update_version_file(version_str: str):
 
 @click.command()
 def setup() -> None:
-    """Performs TomoSAR setup"""
+    """Performs TomoSAR setup."""
     post_merge_path = PROJECT_PATH / ".git" / "hooks" / "post-merge"
     pre_push_path = PROJECT_PATH / ".git" / "hooks" / "pre-push"
     if not post_merge_path.exists():
@@ -100,21 +103,24 @@ def setup() -> None:
     if not SETTINGS_PATH.exists():
         save_default()
         print("Default settings enabled (run tomosar settings to view)")
-    if pyproject_changed:
-        warn("TomoSAR project installation file updated. Run 'pip install -e /path/to/project'")
+    check_required_binaries()
+    if install_changed(update=False):
+        try:
+            run(["make", "-f", PROJECT_PATH / "Makefile", "update"], check=True)
+        except RuntimeError:
+            warn("TomoSAR project installation file updated. Run make update.")
     version = subprocess.check_output(["hatch", "version"]).decode().strip()
     if version != __version__:
         update_version_file(version)
         print(f"TomoSAR version updated to: {version}")
-    check_required_binaries()
     warm_cache()
 
 @click.command()
 def dependencies() -> None:
-    """Scan PATH for required binaries"""
+    """Scan PATH for required binaries."""
     check_required_binaries()
 
 @click.command()
 def warmup() -> None:
-    """Pre-warm __pycache__ by compiling all modules"""
+    """Pre-warm __pycache__ by compiling all modules."""
     warm_cache()

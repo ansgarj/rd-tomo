@@ -73,18 +73,18 @@ def verify_atx(file_path: str|Path):
 
 @click.command()
 def default() -> None:
-    """Restore default settings"""
+    """Restore default settings."""
     save_default()
     print("TomoSAR settings restored to default.")
 
 @click.command()
 def settings() -> None:
-    """Display settings"""
+    """Display settings."""
     Settings().print()
 
 @click.command()
 def verbose() -> None:
-    """Toggle verbose mode"""
+    """Toggle verbose mode."""
     st = Settings()
     if st.VERBOSE:
         st.VERBOSE = False
@@ -99,10 +99,10 @@ def verbose() -> None:
 @click.argument("value")
 def set(key, value) -> None:
     """Set value for settings. Valid keys are:
-    RTKP_CONFIG, DATA_DIRS, PROCESSING_DIRS, TOMO_DIRS, SWEPOS_USERNAME, SWEPOS_PASSWORD, MOCOREF_LONGITUDE, MOCOREF_LATITUDE, MOCOREF_HEIGHT, MOCOREF_ANTENNA"""
+    RTKP_CONFIG, DATA_DIRS, PROCESSING_DIRS, TOMO_DIRS, SWEPOS_USERNAME, SWEPOS_PASSWORD, SWEPOS_COORDINATES, MOCOREF_LONGITUDE, MOCOREF_LATITUDE, MOCOREF_HEIGHT, MOCOREF_ANTENNA"""
     
     valid_keys = ["RTKP_CONFIG", "DATA_DIRS", "PROCESSING_DIRS", "TOMO_DIRS", "SWEPOS_USERNAME", "SWEPOS_PASSWORD",
-                  "MOCOREF_LONGITUDE", "MOCOREF_LATITUDE", "MOCOREF_HEIGHT", "MOCOREF_ANTENNA"]
+                  "MOCOREF_LONGITUDE", "MOCOREF_LATITUDE", "MOCOREF_HEIGHT", "MOCOREF_ANTENNA", "SWEPOS_COORDINATES"]
     settings = Settings()
     if not key in valid_keys:
         raise RuntimeError(f"Invalid key {key}. Valid keys: {valid_keys}")
@@ -114,13 +114,14 @@ def set(key, value) -> None:
 @click.argument("keys", nargs=-1)
 def clear(keys) -> None:
     """Clear Settings value. Valid keys are:
-    RTKP_CONFIG, DATA_DIRS, PROCESSING_DIRS, TOMO_DIRS, SWEPOS_USERNAME, SWEPOS_PASSWORD, MOCOREF_LONGITUDE, MOCOREF_LATITUDE, MOCOREF_HEIGHT, MOCOREF_ANTENNA, DEMS, CANOPIES, MASKS"""
+    RTKP_CONFIG, DATA_DIRS, PROCESSING_DIRS, TOMO_DIRS, SWEPOS_USERNAME, SWEPOS_PASSWORD, SWEPOS_COORDINATES, MOCOREF_LONGITUDE, MOCOREF_LATITUDE, MOCOREF_HEIGHT, MOCOREF_ANTENNA, DEMS, CANOPIES, MASKS"""
     
     valid_keys = ["RTKP_CONFIG", "DATA_DIRS", "PROCESSING_DIRS", "TOMO_DIRS", "SWEPOS_USERNAME", "SWEPOS_PASSWORD",
                   "SATELLITES", "RECEIVERS", "MOCOREF_LONGITUDE", "MOCOREF_LATITUDE", "MOCOREF_HEIGHT", "MOCOREF_ANTENNA",
-                  "DEMS", "CANOPIES", "MASKS"]
+                  "DEMS", "CANOPIES", "MASKS", "SWEPOS_COORDINATES"]
     settings = Settings()
-    default = Settings().reset()
+    default = Settings()
+    default.reset()
     for key in keys:
         if not key in valid_keys:
             warn(f"Key {key} cannot be cleared")
@@ -146,7 +147,8 @@ def add(key, files, antenna: str|None, radome: str) -> None:
 @click.option("--antenna", help="Antenna type", default=None)
 @click.option("--radome", help="Radome type", default="NONE")
 def remove(key, files, antenna: str|None, radome: str) -> None:
-    """Remove files or folders from TomoSAR"""
+    """Remove files or folders from TomoSAR. Valid keys are:
+    DEM, DEMS, CANOPY, CANOPIES, MASK, MASKS, RECEIVER"""
     settings = Settings()
     settings.remove(key, files, antenna=antenna, radome=radome)
     settings.save()

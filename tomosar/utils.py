@@ -12,6 +12,7 @@ from scipy.linalg import svd
 from scipy.optimize import least_squares
 from scipy.ndimage import binary_closing
 from sklearn.linear_model import RANSACRegressor, LinearRegression
+from sklearn.cluster import DBSCAN
 import inspect
 from datetime import timedelta, datetime, date, time
 import math
@@ -23,8 +24,11 @@ import gzip
 import code
 import sys
 import hashlib
+import json
+from pyproj import Transformer
 
-from .processing import circularize
+from .tomogram_processing import circularize
+from .config import Settings
 
 # Custom warnings
 import inspect
@@ -76,10 +80,10 @@ def interactive_console(var_dict: dict) -> None:
     code.interact(banner=banner, local=var_dict)
     
 # Hashing
-def changed(hash_file: Path|str, input: list[Path|str]|Path|str) -> bool:
+def changed(hash_file: Path|str, input: list[Path|str]|Path|str, generate_hash: bool = True) -> bool:
     """Generates hash from input and compare against hash stored in hash file.
     Updates hash in hash file if a change was found."""
-    def generate_hash() -> str:
+    def generate_hash(input: list) -> str:
         hasher = hashlib.sha256()
         for path in sorted(input):  # sort to ensure consistent order
             try:
@@ -109,10 +113,21 @@ def changed(hash_file: Path|str, input: list[Path|str]|Path|str) -> bool:
             return False
         
     # Update hash
-    with open(hash_file, 'w') as dst:
-        dst.write(new_hash)
+    if generate_hash:
+        with open(hash_file, 'w') as dst:
+            dst.write(new_hash)
 
-    return True
+    return generate_hash
+
+# Transformation to local ENU frame from ECEF
+def ecef2enu(lat, lon) -> np.ndarray:
+    lon = np.radians(lon)
+    lat = np.radians(lat)
+    return np.array([
+        [-np.sin(lon), np.cos(lon), 0],
+        [-np.cos(lon)*np.sin(lat), -np.sin(lon)*np.sin(lat), np.cos(lat)],
+        [np.cos(lon)*np.cos(lat), np.sin(lon)*np.cos(lat), np.sin(lat)]
+    ])
 
 # Find change points in linear statistics
 def find_inliers(signal, min_samples: int|float = 0.5, residual_threshold: float|None = None,
@@ -683,3 +698,210 @@ def gunzip(input_path: Path|str, output_path: Path|str = None) -> Path:
 
     input_path.unlink()  # Delete the original .gz file
     return output_path
+
+# Function to read mocoref data from a data file
+def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, pco_offset: float = -0.2, generate: bool = False, verbose: bool = False) -> dict:
+    """Reads mocoref data from a data file. Valid types: CSV, JSON, LLH and mocoref. If not specified attempts to determine file type from file extension.
+    The line parameter specifies which line in a CSV file the mocoref data is read from. Optionally generates a mocoref.moco file.
+    
+    If data is dict or DataFrame instead of Path or string, mocoref data will be read from the dict or DataFrame instead.
+    A DataFrame will be interpreted as having the mocoref data in a single line if the line parameter is positive, and as being an LLH log if it is zero.
+    
+    LLH data read from a file is assumed to lack a header and have identical columns to Reach RS3 output:
+    date, time, latitude, longitude, height, Q, satellites, sdn, sde, sdu, sdne, sdeu, sdun, age, AR_ratio
+    
+    The pco_offset parameter allows the user to specify a vertical PCO offset between the receiver used to record mocoref data and the receiver used in drone processing."""
+
+    # Check if data or data file was passed
+    data_file = None
+    if isinstance(data, dict):
+        type = "JSON"
+    elif isinstance(data, pd.DataFrame):
+        if line == 0:
+            type = "LLH"
+        else:
+            type = "CSV"
+    else:
+        data_file = Path(data)
+        if not data_file.is_file():
+            raise FileNotFoundError(f"File {data_file} cannot be found.")
+        # Automatically interpret type unless specified
+        if type is None:
+            if data_file.suffix in (".CSV", ".csv"):
+                type = "CSV"
+            elif data_file.suffix in (".JSON", ".json"):
+                type = "JSON"
+            elif data_file.suffix in (".LLH", ".llh"):
+                type = "LLH"
+            elif data_file.suffix in (".moco"):
+                type = "mocoref"
+            else:
+                raise RuntimeError("Failed to interpret file type.")
+    
+    type = type.casefold()
+    # Validate type
+    valid_types = ["csv", "json", "llh", "mocoref"]
+    if type not in valid_types:
+        raise TypeError(f"Invalid type {type}. Valid types: {valid_types}")
+    
+    # Get mocoref data 
+    settings = Settings()
+    match type:
+        case "csv" | "CSV":
+            # Read data from file
+            if data_file:
+                data = pd.read_csv(data_file)
+
+            # Validate the presence of mocoref data
+            if settings.MOCOREF_LATITUDE not in data.columns:
+                raise KeyError(f"{settings.MOCOREF_LATITUDE} key not found in {data_file}")
+            if settings.MOCOREF_LONGITUDE not in data.columns:
+                raise KeyError(f"{settings.MOCOREF_LONGITUDE} key not found in {data_file}")
+            if settings.MOCOREF_HEIGHT not in data.columns:
+                raise KeyError(f"{settings.MOCOREF_HEIGHT} key not found in {data_file}")
+            if settings.MOCOREF_ANTENNA not in data.columns:
+                raise KeyError(f"{settings.MOCOREF_ANTENNA} key not found in {data_file}")
+            
+            # Validate line parameter
+            if not isinstance(line, int) or not line > 0:
+                raise TypeError(f"The line parameter must specify a valid positive integer line for this data. Current: {line}")
+            if line > len(data):
+                raise IndexError(f"The line {line} does not exist in data.")
+            
+            mocoref_latitude = data[settings.MOCOREF_LATITUDE].iloc[line - 1]
+            mocoref_longitude = data[settings.MOCOREF_LONGITUDE].iloc[line - 1]
+            mocoref_height = data[settings.MOCOREF_HEIGHT].iloc[line - 1]
+            mocoref_antenna = data[settings.MOCOREF_ANTENNA].iloc[line - 1]
+
+            # Modify antenna offset to account for difference between RS3 and CHCI83 PCO:
+            mocoref_antenna = mocoref_antenna + pco_offset
+
+        case "json" | "JSON":
+            # Read data from file
+            if data_file:
+                data = json.load(data_file)
+
+            # Validate the presence of mocoref data
+            if settings.MOCOREF_LATITUDE not in data:
+                raise KeyError(f"{settings.MOCOREF_LATITUDE} key not found in {data_file}")
+            if settings.MOCOREF_LONGITUDE not in data:
+                raise KeyError(f"{settings.MOCOREF_LONGITUDE} key not found in {data_file}")
+            if settings.MOCOREF_HEIGHT not in data:
+                raise KeyError(f"{settings.MOCOREF_HEIGHT} key not found in {data_file}")
+            if settings.MOCOREF_ANTENNA not in data:
+                raise KeyError(f"{settings.MOCOREF_ANTENNA} key not found in {data_file}")
+            
+            mocoref_latitude = data[settings.MOCOREF_LATITUDE]
+            mocoref_longitude = data[settings.MOCOREF_LONGITUDE]
+            mocoref_height = data[settings.MOCOREF_HEIGHT]
+            mocoref_antenna = data[settings.MOCOREF_ANTENNA]
+        case "llh" | "LLH":
+            # Read data from file
+            if data_file:
+                data = pd.read_csv(data_file, sep=r'\s+',  names=['date','time', settings.MOCOREF_LATITUDE, settings.MOCOREF_LONGITUDE,
+                                                     settings.MOCOREF_HEIGHT, 'quality', 'satellites', 'sdn', 'sde', 'sdu',
+                                                     'sdne', 'sdeu', 'sdun', 'age', 'ar_ratio'])
+
+            # Validate the presence of mocoref data
+            if settings.MOCOREF_LATITUDE not in data:
+                raise KeyError(f"{settings.MOCOREF_LATITUDE} key not found in {data_file}")
+            if settings.MOCOREF_LONGITUDE not in data:
+                raise KeyError(f"{settings.MOCOREF_LONGITUDE} key not found in {data_file}")
+            if settings.MOCOREF_HEIGHT not in data:
+                raise KeyError(f"{settings.MOCOREF_HEIGHT} key not found in {data_file}")
+            
+            # LLH logs record phase center position
+            mocoref_antenna = 0
+            
+            # If quality is specified limit to Q=1 if present and find most dense cluster of continuous segments
+            if 'quality' in data and np.where(data['quality'] == 1):
+                data = data.iloc[np.where(data['quality'] == 1)]    
+
+                # Transformer to ECEF coordinates
+                to_ecef = Transformer.from_crs("epsg:4979", "epsg:4978", always_xy=True)
+                to_geodetic = Transformer.from_crs("epsg:4978", "epsg:4979", always_xy=True)
+
+                # Weight and mean for each continuous segment in ECEF
+                idiff = np.diff(data.index)
+                split_points = np.where(idiff > 1)[0]
+                start = 0
+                weights = []
+                points = []
+                for point in split_points:
+                    end = point + 1
+                    segment = data.iloc[start:end]
+                    weights.append(len(segment))
+                    points.append(to_ecef.transform(
+                        segment[settings.MOCOREF_LONGITUDE].mean(),
+                        segment[settings.MOCOREF_LATITUDE].mean(),
+                        segment[settings.MOCOREF_HEIGHT].mean()
+                    ))
+                    start = end
+                segment = data.iloc[start:]
+                weights.append(len(segment))
+                points.append(to_ecef.transform(
+                    segment[settings.MOCOREF_LONGITUDE].mean(),
+                    segment[settings.MOCOREF_LATITUDE].mean(),
+                    segment[settings.MOCOREF_HEIGHT].mean()
+                ))
+
+                # Convert to numpy arrays
+                weights = np.array(weights)
+                points = np.array(points)
+
+                # Use DBSCAN clustering to find dense regions within the threshold
+                threshold = 0.2  # meters
+                db = DBSCAN(eps=threshold, min_samples=1, metric='euclidean')
+                labels = db.fit_predict(points)
+
+                # Find the cluster with maximum total weight
+                best_cluster_label = None
+                max_weight = 0
+                for label in set(labels):
+                    cluster_mask = labels == label
+                    cluster_weight = weights[cluster_mask].sum()
+                    if cluster_weight > max_weight:
+                        max_weight = cluster_weight
+                        best_cluster_label = label
+
+                # Extract best cluster
+                best_mask = labels == best_cluster_label
+                points = points[best_mask]
+                weights = weights[best_mask]
+
+                # Perform weighted mean
+                pos = np.sum(weights[:, np.newaxis] * points, axis=0) / np.sum(weights)
+                mocoref_longitude, mocoref_latitude, mocoref_height = to_geodetic.transform(*pos)
+            else:
+                mocoref_latitude = data[settings.MOCOREF_LATITUDE].mean()
+                mocoref_longitude = data[settings.MOCOREF_LONGITUDE].mean()
+                mocoref_height = data[settings.MOCOREF_HEIGHT].mean()
+        case "mocoref":
+            if not data_file:
+                raise RuntimeError("No mocoref file was specified")
+            with open(data_file, 'r') as file:
+                lines = file.readlines()
+            value = re.compile(r"\d+(?:[\.\,]\d*)?")
+            mocoref_antenna = float(value.search(lines[3]))
+            mocoref_latitude = float(value.search(lines[4]))
+            mocoref_longitude = float(value.search(lines[5]))
+            mocoref_height = float(value.search(lines[6]))
+
+    if generate or verbose:
+        lines = []
+        lines.append("Moco reference {CH}\n")
+        lines.append("===================\n")
+        lines.append("\n")
+        lines.append(f"Antenna height [m] {{d}}: {mocoref_antenna}\n")
+        lines.append(f"Latitude [deg]     {{d}}: {mocoref_latitude}\n")
+        lines.append(f"Longitude [deg]    {{d}}: {mocoref_longitude}\n")
+        lines.append(f"Ground [m]         {{d}}: {mocoref_height}")
+    if generate:
+        mocoref_path = data_file.parent / "mocoref.moco"
+        with open(mocoref_path, 'w') as file:
+            file.writelines(lines)
+        print(f"{mocoref_path} generated")
+    if verbose or settings.VERBOSE:
+        print(''.join(lines))
+
+    return mocoref_latitude, mocoref_longitude, mocoref_height, mocoref_antenna

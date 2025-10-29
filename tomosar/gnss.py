@@ -13,8 +13,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import json
 
-from .utils import prompt_ftp_login, gunzip
-from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, ppp, resource
+from .utils import prompt_ftp_login, gunzip, ecef2enu
+from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, ppp, resource, local
 from .config import Settings
 
 def extract_rnx_info(file_path):
@@ -245,12 +245,12 @@ def merge_swepos_rinex(data_dir):
 
     # Merge rinex files    
     if obs_files:
-        merged_obs = merge_rnx(obs_files)
+        merged_obs = merge_rnx(obs_files, force=True)
     else:
         merged_obs = None
 
     if nav_files:
-        merged_nav = merge_rnx(nav_files)
+        merged_nav = merge_rnx(nav_files, force=True)
     else:
         merged_nav = None
 
@@ -263,7 +263,7 @@ def merge_ephemeris(data_dir):
 
 
     if eph_files:
-        merged_sp3, merged_clk = merge_eph(eph_files)
+        merged_sp3, merged_clk = merge_eph(eph_files, force=True)
 
     return merged_sp3, merged_clk
 
@@ -281,11 +281,11 @@ def fetch_sp3_clk(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure start time is at least 12 hours before start
-    start_time = start_time - timedelta(hours=12)
+    # Ensure start time is at least 6 hours before start
+    start_time = start_time - timedelta(hours=6)
     start_time = start_time.date()
-    # Ensure end time is at least 12 hours after end
-    end_time = end_time + timedelta(hours=12)
+    # Ensure end time is at least 6 hours after end
+    end_time = end_time + timedelta(hours=6)
     end_time = end_time.date()
 
     # Collect files to download
@@ -411,11 +411,11 @@ def read_pos_file(filepath):
     
     return coords, q, gpst
 
-def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[tuple[float, float, float],
+def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarray,
                                                                        np.ndarray,
-                                                                       float,
-                                                                       tuple[float, float, float],
-                                                                       tuple[float, float, float]
+                                                                       int,
+                                                                       np.ndarray,
+                                                                       np.ndarray
                                                                     ]:
     x, y, z = [], [], []
     err, ts = [], []
@@ -427,9 +427,18 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[tuple[flo
         full_datetime = base_date + timedelta(days=doy - 1, seconds=sod)
         return full_datetime
 
-
+    diff_n, diff_e, diff_u = [], [], []
     with open(file_path, 'r') as f:
         for line in f:
+            if line.startswith("INFO MODELLING Receiver Antenna Reference Point (ARP)"):
+                def extract_three_floats(text: str) -> None | tuple[float, float, float]:
+                    match = re.search(r'([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)[ \t]+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)[ \t]+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', text)
+                    if match:
+                        return tuple(map(float, match.groups()))
+                    else:
+                        return None
+                arp = np.asarray(extract_three_floats(line))
+
             if line.startswith("OUTPUT"):
                 parts = line.split()
                 try:
@@ -439,6 +448,9 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[tuple[flo
                     x_err.append(float(parts[17]))
                     y_err.append(float(parts[18]))
                     z_err.append(float(parts[19]))
+                    diff_n.append(float(parts[23]))
+                    diff_e.append(float(parts[24]))
+                    diff_u.append(float(parts[25]))
                     err.append(float(parts[10]))
                     ts.append(get_timestamp(year=int(parts[1]), doy=int(parts[2]), sod=float(parts[3])))
                 except (IndexError, ValueError):
@@ -465,9 +477,9 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[tuple[flo
     z_mean = z[conv].mean()
 
     # STD after convergence
-    x_std = x[conv].std()
-    y_std = y[conv].std()
-    z_std = z[conv].std()
+    # x_std = x[conv].std()
+    # y_std = y[conv].std()
+    # z_std = z[conv].std()
 
     # Residuals
     x_res = x - x_mean
@@ -484,11 +496,12 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[tuple[flo
         print(f"PPP solution converged after {conv_time}, average taken over {total_time - conv_time}")
         print(f"Position: lat={lat}, lon={lon}, h={h:.3f}")
 
-    rotation = np.array([[-np.sin(lon), np.cos(lon), 0],
-                         [-np.cos(lon)*np.sin(lat), -np.sin(lon)*np.sin(lat), np.cos(lat)],
-                         [np.cos(lon)*np.cos(lat), np.sin(lon)*np.cos(lat), np.sin(lat)]])
+    rotation = ecef2enu(lat, lon)
+    
+    mean = (x_mean, y_mean, z_mean) - rotation.T @ arp
+    diff = (diff_e, diff_n, diff_u) - arp
 
-    return (x_mean, y_mean, z_mean), rotation,  idx, (x_std, y_std, z_std), (x_res, y_res, z_res)
+    return mean, rotation,  idx, diff, np.asarray((x_res, y_res, z_res))
 
 def detect_convergence_and_mean(x_vals, y_vals, z_vals, x_err, y_err, z_err, err, window_size=100, threshold_percentile=10, verbose: bool = False):
     # Residuals from full-series mean
@@ -576,16 +589,60 @@ def update_rinex_position(file_path, new_coords):
             lines[i] = new_line
             updated = True
             break
-
+    
     if not updated:
         for i, line in enumerate(lines):
             if "END OF HEADER" in line:
                 lines.insert(i, new_line)
                 break
+    
+    lines.insert(2,"THE COORDINATES HAVE BEEN UPDATED IN WGS84                  COMMENT\n")
 
     with open(file_path, 'w') as file:
         file.writelines(lines)
-    print(f"{file_path} header position updated.")
+    print(f"{local(file_path)} header position updated.")
+
+import numpy as np
+from datetime import datetime, timezone
+
+def etrs89_to_wgs84_ecef(X_etrs89, Y_etrs89, Z_etrs89, utc_datetime) -> np.ndarray:
+    """Converts ETRS89 ECEF (assumed ETRF2000) coordinates to ITRF208 using time-dependent Helmert transformation."""
+
+    # Convert datetime to fractional year
+    year = utc_datetime.year
+    start_of_year = datetime(year, 1, 1, tzinfo=timezone.utc)
+    end_of_year = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    year_length = (end_of_year - start_of_year).total_seconds()
+    seconds_into_year = (utc_datetime - start_of_year).total_seconds()
+    epoch_target = year + seconds_into_year / year_length
+
+    # Reference epoch for ETRF2000 to ITRF2008
+    t_ref = 2000.0
+    delta_t = epoch_target - t_ref
+
+    # Helmert parameters: ETRF2000 → ITRF2008
+    dX = -(0.0521 + 0.0001 * delta_t)
+    dY = -(0.0493 + 0.0001 * delta_t)
+    dZ = 0.0585 + 0.0018 * delta_t
+    rX_arcsec = -(0.000891 + 0.000081 * delta_t)
+    rY_arcsec = -(0.005390 + 0.000490 * delta_t)
+    rZ_arcsec = 0.008712 + 0.000792 * delta_t
+    rX = np.deg2rad(rX_arcsec / 3600)
+    rY = np.deg2rad(rY_arcsec / 3600)
+    rZ = np.deg2rad(rZ_arcsec / 3600)
+    s_ppm = 0.00134 + 0.00008 * delta_t
+    s = s_ppm * 1e-6
+
+    # Apply transformation: ETRF2000 → ITRF2008
+    X = np.array([X_etrs89, Y_etrs89, Z_etrs89])
+    R = np.array([
+        [1, -rZ, rY],
+        [rZ, 1, -rX],
+        [-rY, rX, 1]
+    ])
+    X_itrf2008 = (1 + s) * R @ X + np.array([dX, dY, dZ])
+
+    return X_itrf2008
 
 # Orchestrating functions
 def fetch_swepos(
@@ -614,7 +671,7 @@ def fetch_swepos(
         if not obs_path.exists() or not nav_path.exists() or not sbs_path.exists():
             ubx2rnx(drone_ubx)
     tmp_dir = output_dir / "TMP"
-   
+    
     if not cont:
         start_utc, end_utc, pos = extract_rnx_info(obs_path)
         stockholm_tz = pytz.timezone('Europe/Stockholm')
@@ -629,7 +686,7 @@ def fetch_swepos(
 
         lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(*pos)
         if pos:
-            print(f"Approximate location: (lat: {lat}, lon: {lon}, h: {h:.3})")
+            print(f"Approximate location: (lat: {lat}, lon: {lon}, h: {h:.3f})")
         else:
             print("No valid position could be extracted from the file.")
 
@@ -679,7 +736,12 @@ def fetch_swepos(
             raise RuntimeError("Merging of downloaded observation files failed")
         if not merged_nav is None and not merged_nav.is_file():
             raise RuntimeError("Merging of downloaded navigation files failed")
+        
+        start_utc, _, etrs89_pos = extract_rnx_info(merged_obs)
+        wgs84_pos = etrs89_to_wgs84_ecef(*etrs89_pos, utc_datetime=start_utc)
+        update_rinex_position(merged_obs, wgs84_pos)
         return merged_obs, merged_nav
+    
     return None, None
     
 def station_ppp(
@@ -697,7 +759,7 @@ def station_ppp(
     
     # Set up output_dir
     if output_dir is None:
-        output_dir = data_dir / "SATEPH"
+        output_dir = data_dir
     else:
         output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
@@ -725,10 +787,11 @@ def station_ppp(
         print("done.")
 
     # Set up PPP command
-    out_path = output_dir / obs_path.with_suffix(".glab.out").name
+    out_path = output_dir / obs_path.with_suffix(".out").name
     if not out_path.exists() or not cont:
         sp3_file = next(f for f in output_dir.glob("*.SP3"))
         clk_file = next(f for f in output_dir.glob("*.CLK"))
+        print()
         ppp(
             obs_file=obs_path,
             sp3_file=sp3_file,
@@ -748,7 +811,6 @@ def station_ppp(
     diff = rotation @ [pos[0] - approx_pos[0], pos[1] - approx_pos[1], pos[2] - approx_pos[2]]
     distance = math.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
     print(f"Distance: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
-    print()
     if header:
         update_rinex_position(obs_path, pos)
     lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(*pos)

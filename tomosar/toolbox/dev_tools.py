@@ -4,6 +4,7 @@ from pathlib import Path
 from pyproj import Transformer
 import csv
 import matplotlib.pyplot as plt
+import matplotlib
 import csv
 import struct
 import numpy as np
@@ -11,13 +12,20 @@ import numpy as np
 from ..gnss import extract_rnx_info, read_out_file, read_pos_file
 from ..binaries import rnx2rtkp, resource
 from ..config import PACKAGE_PATH
+from .setup_tools import install_changed
 
-from pathlib import Path
+matplotlib.use("Qt5Agg")
+
+@click.group(hidden=True)
+def dev() -> None:
+    """Entry point for dev tools"""
+    pass
    
-@click.command()
+@dev.command()
 @click.argument("input_file", type=click.Path(exists=True, path_type=Path))
 @click.option("-d", "--duration", type=int, help="Minimized duration (seconds)", default=600)
-def minimize_ubx(input_file, duration: int = 600) -> None:
+def sample_ubx(input_file, duration: int = 600) -> None:
+    """Extract a segment from a UBX file"""
     from pyubx2 import UBXReader
     with open(input_file, 'rb') as infile:
         ubr = UBXReader(infile, protfilter=2)  # UBX only
@@ -42,7 +50,7 @@ def minimize_ubx(input_file, duration: int = 600) -> None:
 
     print(f"Saved {len(messages)} messages to {output_file}")
 
-@click.command()
+@dev.command()
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
 def rnx_info(file: Path) -> None:
     """Display timestamp and header position info extracted from a RNX file."""
@@ -64,9 +72,9 @@ def rnx_info(file: Path) -> None:
 
 def extract_imu_to_csv(bin_filename: str | Path, csv_filename: str | Path, num_samples: int = None):
     labels = [
+        "channel_7 (raw)", "channel_8 (raw)",
         "anglvel_x (deg/s)", "anglvel_y (deg/s)", "anglvel_z (deg/s)",
         "accel_x (g)", "accel_y (g)", "accel_z (g)",
-        "channel_7 (raw)", "channel_8 (raw)"
     ]
     rows = []
     with open(bin_filename, "rb") as binfile, open(csv_filename, "w", newline="") as csvfile:
@@ -74,6 +82,7 @@ def extract_imu_to_csv(bin_filename: str | Path, csv_filename: str | Path, num_s
         writer.writerow(labels)
 
         count = 0
+        nan_count = 0
         while True:
             if num_samples is not None and count >= num_samples:
                 break
@@ -82,23 +91,59 @@ def extract_imu_to_csv(bin_filename: str | Path, csv_filename: str | Path, num_s
                 break
             # Unpack 8 little-endian floats
             row = list(struct.unpack('<8f', sample))
+            nan_count += np.isnan(row).sum()
             writer.writerow([f"{v:.6f}" for v in row])
             rows.append(row)
             count += 1
+    
+    rows = [ [row[i] for row in rows] for i in range(8) ]
+    print(f"\nTotal NaN count: {nan_count/(8*count) * 100} %")
     return rows, labels
 
-@click.command()
+def close_micro_gaps(data, max_gap=1):
+    data = np.array(data)
+    nan_mask = np.isnan(data)
+    if np.any(nan_mask):
+        data[nan_mask] = np.interp(
+            np.flatnonzero(nan_mask),
+            np.flatnonzero(~nan_mask),
+            data[~nan_mask]
+        )
+    return data
+
+@dev.command()
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
 @click.option("-n", "--num", type=int, default=None, help="Number of samples to read")
-def read_imu(file: Path, num: int|None) -> None:
+@click.option("-p", "--processed", is_flag=True, help="Look for processed file and plot both")
+def read_imu(file: Path, num: int|None, processed: bool = False) -> None:
     """Try to read an IMU log and convert to CSV, and plot the results."""
     # Load and plot
     channels, labels = extract_imu_to_csv(file, file.with_suffix('.csv'), num_samples=num)
-    channels = [ [row[i] for row in channels] for i in range(8) ]
+    processed_channels = []
+    if file.with_suffix(".bin_out").exists() and processed:
+        processed_channels, _ = extract_imu_to_csv(file.with_suffix(".bin_out"), file.with_suffix(".csv_out"), num_samples=num)
     plt.figure(figsize=(14, 12))
     for i in range(8):
         plt.subplot(4, 2, i+1)
-        plt.plot(channels[i][1:], '-x')
+        data = np.array(channels[i][1:])
+        non_nan_data = close_micro_gaps(data, max_gap=1)
+
+        nan_indices = np.where(np.isnan(data))[0]
+        if processed_channels:
+            processed_data = np.array(processed_channels[i][1:])
+            plt.plot(processed_data, 'gx', label='Processed Data')
+            factor = processed_data[~np.isnan(data)] / data [~np.isnan(data)]
+            factor = np.median(factor)
+            print(f"Channel {i}: {factor}")
+            if not np.isnan(factor):
+                data = factor * data
+                non_nan_data = factor * non_nan_data / 2
+
+        plt.plot(data, 'bx', label='Data')
+        # Find and mark NaNs with red 'x'
+        plt.plot(nan_indices, non_nan_data[nan_indices], 'rx', label='NaN')
+
+        plt.legend()
         plt.title(labels[i])
         plt.xlabel("Sample Index")
         plt.ylabel("Value")
@@ -106,14 +151,15 @@ def read_imu(file: Path, num: int|None) -> None:
     plt.tight_layout()
     plt.show()
 
-@click.command()
+@dev.command()
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
 def inspect_out(file: Path) -> None:
     """Inspect the .out file produced by glab."""
-    _, _, conv_idx, _, residuals = read_out_file(
+    _, _, conv_idx, diff, residuals = read_out_file(
         file_path=file,
         verbose=True
     )
+
     coords = ["X", "Y", "Z"]
     plt.axvline(x=conv_idx, linestyle="--", color='r', label="Convergence")
     for i, res in enumerate(residuals):
@@ -124,6 +170,15 @@ def inspect_out(file: Path) -> None:
         plt.legend()
     plt.show()
 
+    coords = ["E", "N", "U"]
+    plt.axvline(x=conv_idx, linestyle="--", color='r', label="Convergence")
+    for i, d in enumerate(diff):
+        plt.plot(d, label=f"{coords[i]}")
+        plt.xlabel("Epoch number")
+        plt.ylabel("Divergence")
+        plt.title("Divergence plot")
+        plt.legend()
+    plt.show()
 
 
 def plot_coordinates(coords1, coords2, labels, title1, title2):
@@ -160,7 +215,7 @@ def plot_difference(t1, coords1, t2, coords2, labels):
     plt.tight_layout()
     plt.show()
 
-@click.command()
+@dev.command()
 @click.argument("rover_obs", type=click.Path(exists=True, path_type=Path))
 @click.argument("base1_obs", type=click.Path(exists=True, path_type=Path))
 @click.argument("base2_obs", type=click.Path(exists=True, path_type=Path))
@@ -211,3 +266,8 @@ def compare_rtkp(rover_obs, base1_obs, base2_obs, nav_path, conf_path, sbs_path,
     #plot_coordinates(coords1, coords2, labels, pos1, pos2)
 
     plot_difference(t1, coords1, t2, coords2, labels)
+
+@dev.command()
+def update_install() -> None:
+    """Updates the local install.hash to match current pyproject.toml"""
+    install_changed(update=True)

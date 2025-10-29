@@ -21,7 +21,7 @@ from collections import defaultdict
 import copy
 
 from .utils import warn, collect_statistics, estimaterr, apply_variable_descriptions, parse_datetime_string
-from .processing import multilook, filter
+from .tomogram_processing import multilook, filter
 from .apperture import SARModel
 from .config import Settings
 
@@ -993,23 +993,38 @@ class TomoInfo:
     TOMOGRAM_PARAMETERS: ClassVar[list[str]] = ['band', 'width', 'res', 'smo', 'ham', 'lat', 'lon', 
                                                 'DC', 'DL', 'HC', 'HV', 'squint']
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.masks = Masks(parent=self)
         self.multilook = Multilook(parent=self)
         self.filter = Filter(parent=self)
         self.stats = TomoStats(parent=self)
     
     @property
-    def slices(self):
+    def slices(self) -> SliceInfo:
         return self._slices.copy()
     
     @property
-    def info(self):
+    def parameters(self) -> dict:
+        return {'band': self.band,
+            'width': self.width, 'res': self.res, 'vres': self.vres,
+            'bottom': self.bottom, 'top': self.top, 'smo': self.smo,
+            'ham': self.ham, 'refr': self.refr, 'lat': self.lat, 'lon': self.lon,
+            'DC': self.DC, 'DL': self.DL, 'HC': self.HC, 'HV': self.HV,
+            'thresh': self.thresh, 'squint': self.squint, 'text': self.text,
+            'category': self.category, 'height': self.tomograms.height.tolist(),
+            'multilook': self.multilook.factor if self.multilook else 1,
+            'sigma_xi': self.filter.sigma_xi, 'filter_size': self.filter.size, 
+            'point_percentile': self.filter.point_percentile, 'point_threshold': self.filter.point_threshold
+        }
+    
+    @property
+    def info(self) -> dict:
         # Get band specific parameters from the parent TomoScene
         if self._scene is None:
             raise AttributeError("TomoInfo object has not been initialized as a part of a TomoScene")
             band = 'C-band'
-        return self._scene.info
+        info = self._scene._info
+        info[self.band] = self.parameters
 
     def update(self) -> None:
         self.masks.update()
@@ -1343,7 +1358,7 @@ class TomoInfo:
     def get(self, key: str):
         return getattr(self, key, None)
     
-    def __eq__(self, other):
+    def __eq__(self, other) -> bool:
         if not isinstance(other, 'TomoInfo'):
             return False
         return all(self.get(key) == other.get(key) for key in TomoInfo.TOMOGRAM_PARAMETERS)
@@ -1354,12 +1369,12 @@ class TomoScene:
     date: datetime = None
     spiral: int = None
     tomograms: Dict[str, TomoInfo] = field(default_factory=dict)
-    info: Dict[str, float] = field(default_factory=dict)
+    _info: Dict[str, float] = field(default_factory=dict)
     moco: pd.DataFrame = field(default_factory=pd.DataFrame)
     _model: SARModel = None
     
     @property
-    def model(self):
+    def model(self) -> SARModel:
         if self._model is None:
             self._model = SARModel(self.moco)
         return self._model
@@ -1381,6 +1396,13 @@ class TomoScene:
     def bands(self) -> list[str]:
         return list(self.keys())
     
+    @property
+    def info(self) -> dict:
+        info = self._info
+        for band in self.bands:
+            info[band] = self[band].parameters
+        return info
+    
     def get(self, band: str) -> TomoInfo:
         return self.tomograms.get(band)
     
@@ -1394,7 +1416,7 @@ class TomoScene:
         new_scene = TomoScene(id=self.id, date=self.date, spiral=self.spiral)
         for band, tomos in self.items():
             new_scene[band] = tomos.copy()
-        new_scene.info = self.info.copy()
+        new_scene._info = self._info.copy()
         new_scene.moco = self.moco.copy()
         new_scene._model = self._model.copy()
         return new_scene
@@ -1460,7 +1482,7 @@ class TomoScene:
             json.dump({
                 'date': self.date.isoformat(timespec='seconds'),
                 'spiral': self.spiral,
-                'info': self.info
+                'info': self._info
                 }, f, indent=4)
 
         # Save .moco cut explicitly as .csv
@@ -1976,6 +1998,22 @@ def sliceinfo(path: str|Path = '.', filter: ImageInfo = None, read: bool = False
         slice_info.read(npar)
     
     return slice_info
+
+def tomoinfo(path: str|Path) -> dict:
+    """Prints info about a .tomo folder"""
+    path = Path(path)
+    if not path.is_dir() or path.resolve().suffix != ".tomo":
+        raise ValueError(f"Invalid path {path}")
+    
+    with open(path / "flight_info.json", 'r') as info_file:
+        info = json.load(info_file)
+
+    for dir in path.iterdir():
+        if dir.is_dir():
+            with open(dir / "processing_parameters.json", 'r') as band_file:
+                info[dir.name] = json.load(band_file)
+    
+    return info
 
 def tomoload(path: str = '.', cached: bool = True, npar: int = os.cpu_count()) -> TomoScene | TomoScenes:
     """

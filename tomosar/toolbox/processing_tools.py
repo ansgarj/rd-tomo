@@ -7,11 +7,35 @@ import datetime
 from ..gnss import fetch_swepos as run_fetch_swepos, station_ppp as run_station_ppp
 from ..trackfinding import trackfinder as run_trackfinder
 from .. import ImageInfo, TomoScenes
-from ..utils import interactive_console
+from ..utils import interactive_console, mocoref as generate_mocoref
 from ..forging import tomoforge
 
 @click.command()
-@click.argument("filepath", type=click.Path(exists=True, path_type=Path))
+@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.option("-d","--dry", is_flag=True, help="Do not generate file (displays result)")
+@click.option("--csv", is_flag=True, help="File is a CSV file (default for .csv and .CSV files)")
+@click.option("--json", is_flag=True, help="File is a JSON file (default for .json and .JSON files)")
+@click.option("--llh", is_flag=True, help="File is an LLH log (default for .llh and .LLH files)")
+@click.option("-l", "--line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
+@click.option("--offset", type=float, default=-0.2, help="Specify vertical PCO between data log receiver and drone processing receiver (default=-0.2)")
+def mocoref(path, dry, csv, json, llh, line) -> None:
+    """Generate a mocoref file from a data file"""
+    if csv:
+        if json or llh:
+            raise ValueError("Only one of --csv, --json and --llh can be used")
+        type = "CSV"
+    elif json:
+        if llh:
+            raise ValueError("Only one of --csv, --json and --llh can be used")
+        type = "JSON"
+    elif llh:
+        type = "LLH"
+    else:
+        type = None
+    generate_mocoref(data=path, type=type, line=line, generate=not dry, verbose=dry)
+
+@click.command()
+@click.argument("path", type=click.Path(exists=True, path_type=Path))
 @click.option("--stations", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the SWEPOS coordinate list CSV")
 @click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
 @click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
@@ -19,11 +43,11 @@ from ..forging import tomoforge
 @click.option("-d", "--dry", is_flag=True, help="Dry run without downloads")
 @click.option("--cont", is_flag=True, help="Continue run after downloads complete")
 @click.option("-n","--nav", is_flag=True, help="Also fetch nav files.")
-def fetch_swepos(filepath, stations, downloads, attempts, output, dry, cont, nav) -> None:
-    """Extract GNSS info and find nearest SWEPOS station.
+def fetch_swepos(path, stations, downloads, attempts, output, dry, cont, nav) -> None:
+    """Extract GNSS info from rover gnss log or RINEX observation file and find nearest SWEPOS station.
     Then download files into output directory."""
     run_fetch_swepos(
-        filepath=filepath,
+        filepath=path,
         stations_path=stations,
         max_downloads=downloads,
         max_retries=attempts,
@@ -44,7 +68,7 @@ def fetch_swepos(filepath, stations, downloads, attempts, output, dry, cont, nav
 @click.option("--cont", is_flag=True, help="Continue run after downloads complete")
 @click.option("-x", "--no-header", 'header', is_flag=True, default=True, flag_value=False, help="Do not fodify OBS file header with new position.")
 def station_ppp(data_dir, atx, receiver, downloads, attempts, output, dry, cont, header) -> None:
-    """Extract GNSS info and find nearest SWEPOS station."""
+    """Attempt to determine base station position using PPP post processing."""
     run_station_ppp(
         data_dir=data_dir,
         atx_path=atx,
@@ -65,7 +89,7 @@ def station_ppp(data_dir, atx, receiver, downloads, attempts, output, dry, cont,
 @click.option("--dem", type=click.Path(exists=True, path_type=Path), default=None, help="Path to DEM file or folder to combine with DEMS_GROUND")
 @click.option("--npar", type=int, default=None, help="Number of parallel processes (default: CPU count)")
 def trackfinder(path, linear, verbose, dry, dem, npar) -> None:
-    """Run trackfinder on a .moco file."""
+    """Run trackfinder on a .moco file containing integrated GNSS and IMU data."""
     run_trackfinder(
         path=path,
         dem_path=dem,
@@ -118,6 +142,7 @@ def forge(paths, single, nopair, RR, fused, sub, sup, canopy,
          phh, lxx, lhh, lvv, lhv, lvh, cvv, load,
          out, masks, npar, folder, date, time, spiral, width, res, refr,
          lat, lon, thresh, smo, ham, squint, text, DC, DL, HC, HV) -> TomoScenes:
+    """Forge slices into Tomogram Directories."""
 
     time_start = Time.time()
 

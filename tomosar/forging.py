@@ -40,6 +40,9 @@ def recursive_search(paths: str|Path|list[str|Path], filter: ImageInfo = None) -
     print("\nScanning directories ...")
 
     for root_path in paths:
+        info = SliceInfo.scan(path=root_path, read=False, filter=filter)
+        if info:
+            slice_info.extend(info)
         for dirpath in root_path.rglob("*"):
             if dirpath.is_dir():
                 print(dirpath)
@@ -71,8 +74,6 @@ def recursive_search(paths: str|Path|list[str|Path], filter: ImageInfo = None) -
                 info = SliceInfo.scan(str(dirpath), read=False, filter=filter)
                 if info:
                     slice_info.extend(info)
-
-
 
     return slice_info, flight_infos, moco_cuts
 

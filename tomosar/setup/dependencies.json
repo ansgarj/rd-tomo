@@ -1,16 +1,17 @@
 {
-	"git": {
+	"make": {
 		"Usage": "Setup tool",
-		"Source": "Package manager or https://gitforwindows.org/",
+		"Source": "Package manager or https://gnuwin32.sourceforge.net/packages/make.htm",
 		"Used_by": {
 			"tools": {
-				"tomosar": ["setup"]
+				"tomosar": ["setup"],
+				"make": ["install", "update"]
 			}
 		}
 	},
 	"convbin": {
 		"Usage": "GNSS binary format conversion to RINEX",
-		"Source": "https://github.com/rinex20/RTKLIB-demo5",
+		"Source": "https://github.com/rtklibexplorer/RTKLIB",
 		"Used_by": {
 			"module": [
 				"tomosar.fetch_swepos()"
@@ -22,7 +23,7 @@
 	},
 	"rnx2rtkp": {
 		"Usage": "GNSS RTK post processing",
-		"Source": "https://github.com/rinex20/RTKLIB-demo5",
+		"Source": "https://github.com/rtklibexplorer/RTKLIB",
 		"Used_by": {
 			"module": [
 				"N/A"
