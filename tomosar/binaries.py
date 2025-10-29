@@ -210,10 +210,10 @@ def resource(path: str | Path | None, key: str = None, **kwargs) -> Iterator[Pat
             vrt_path = build_vrt(Settings().CANOPIES)
             tmp_path = generate_raster(vrt_path)
         case "TEST_FILE_SVB":
-            with importpath('tomosar.tests',"minimal_svb.ubx") as test_file:
+            with importpath('tomosar.test_files',"minimal_svb.ubx") as test_file:
                 tmp_path = local_copy(test_file)
         case "TEST_FILE_SAVAR":
-            with importpath('tomosar.tests',"minimal_savar.ubx") as test_file:
+            with importpath('tomosar.test_files',"minimal_savar.ubx") as test_file:
                 tmp_path = local_copy(test_file)
     
     # Find all {{KEY}} in the file
