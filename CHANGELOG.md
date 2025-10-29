@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `tomosar test station-ppp` which runs `station-ppp` and compares against ground truth as found in a mocoref data file
+
+### Changed
+- Changed `tomosar.gnss.station_ppp` to take explicit paths to the observation file and optionally the GLONASS navigation data, instead of a data directory, and correspondingly for `tomosar station-ppp`
+
 ## [0.0.5] - 2025-10-29
 
 ### Added

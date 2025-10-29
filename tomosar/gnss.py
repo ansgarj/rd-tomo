@@ -17,7 +17,7 @@ from .utils import prompt_ftp_login, gunzip, ecef2enu
 from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, ppp, resource, local
 from .config import Settings
 
-def extract_rnx_info(file_path):
+def extract_rnx_info(file_path: str|Path) -> tuple[datetime|None, datetime|None, tuple[float, float, float]]:
     """
     Extract start/end times and approximate position from RINEX header.
     """
@@ -58,7 +58,7 @@ def extract_rnx_info(file_path):
         end_time = get_last_rinex_timestamp(file_path)
     return start_time, end_time, approx_position
 
-def get_first_rinex_timestamp(file_path):
+def get_first_rinex_timestamp(file_path: str|Path) -> datetime | None:
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         header_ended = False
         for line in f:
@@ -75,7 +75,7 @@ def get_first_rinex_timestamp(file_path):
                 return datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=timezone.utc)
     return None
 
-def get_last_rinex_timestamp(file_path):
+def get_last_rinex_timestamp(file_path: str|Path) -> datetime | None:
     with open(file_path, 'rb') as f:
         # Read file in reverse
         for line in reversed(list(f.readlines())):
@@ -88,7 +88,6 @@ def get_last_rinex_timestamp(file_path):
                 parts = line.split()
                 # Format: > YYYY MM DD HH MM SS.SSS...
                 year, month, day, hour, minute, second = map(float, parts[1:7])
-                from datetime import datetime
                 return datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=timezone.utc)
     return None
 
@@ -238,7 +237,7 @@ def fetch_swepos_files(
 
     return failed
 
-def merge_swepos_rinex(data_dir):
+def merge_swepos_rinex(data_dir: str|Path) -> tuple[Path|None, Path|None]:
     data_path = Path(data_dir)
     obs_files = sorted(data_path.glob("*O.rnx"))
     nav_files = sorted(data_path.glob("*N.rnx"))
@@ -256,7 +255,7 @@ def merge_swepos_rinex(data_dir):
 
     return merged_obs, merged_nav
 
-def merge_ephemeris(data_dir):
+def merge_ephemeris(data_dir: str|Path) -> tuple[Path|None, Path|None]:
     data_path = Path(data_dir)
     eph_files = sorted(data_path.glob("*.SP3"))
     eph_files.extend(sorted(data_path.glob("*.CLK")))
@@ -274,7 +273,7 @@ def fetch_sp3_clk(
     dry: bool = False,
     max_workers: int = 10,
     max_retries: int = 3
-):
+) -> int:
     ftp, ftp_user, ftp_pass = prompt_ftp_login('gssc.esa.int', max_attempts=max_retries, anonymous=True)
 
     # Prepare output directory
@@ -346,7 +345,7 @@ def fetch_sp3_clk(
         return
 
 
-    def download_file(file_info):
+    def download_file(file_info: tuple[str, str, Path]) -> tuple[str, bool]:
         ftp_path, filename, local_path = file_info
         for attempt in range(1, max_retries + 1):
             try:
@@ -379,13 +378,18 @@ def fetch_sp3_clk(
     
     return failed
 
-def date_to_gps_week(input_date):
+def date_to_gps_week(input_date: datetime) -> int:
     gps_start = date(1980, 1, 6)  # GPS epoch
     delta = input_date - gps_start
     gps_week = delta.days // 7
     return gps_week
 
-def read_pos_file(filepath):
+def read_pos_file(filepath: str|Path) -> tuple[np.ndarray, float, np.ndarray]:
+    """Parses a rnx2rtkp .pos file.
+    Returns:
+        array with the coordinates,
+        float with the percentage of Q1,
+        array with the GPST corresponding to the coordinates"""
     with open(filepath, 'r') as f:
         lines = f.readlines()
 
@@ -491,7 +495,7 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
     total_time = ts[-1] - ts[0]
 
     # Geodetic coordinates
-    lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(x_mean, y_mean, z_mean)
+    lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4979", always_xy=True).transform(x_mean, y_mean, z_mean)
     if verbose or Settings().VERBOSE:
         print(f"PPP solution converged after {conv_time}, average taken over {total_time - conv_time}")
         print(f"Position: lat={lat}, lon={lon}, h={h:.3f}")
@@ -575,7 +579,7 @@ def detect_convergence_and_mean(x_vals, y_vals, z_vals, x_err, y_err, z_err, err
 
     return (x_mean, y_mean, z_mean), (x_std, y_std, z_std), convergence_index
 
-def update_rinex_position(file_path, new_coords):
+def update_rinex_position(file_path, new_coords) -> None:
     with open(file_path, 'r') as file:
         lines = file.readlines()
     if np.isnan(new_coords).any():
@@ -601,9 +605,6 @@ def update_rinex_position(file_path, new_coords):
     with open(file_path, 'w') as file:
         file.writelines(lines)
     print(f"{local(file_path)} header position updated.")
-
-import numpy as np
-from datetime import datetime, timezone
 
 def etrs89_to_wgs84_ecef(X_etrs89, Y_etrs89, Z_etrs89, utc_datetime) -> np.ndarray:
     """Converts ETRS89 ECEF (assumed ETRF2000) coordinates to ITRF208 using time-dependent Helmert transformation."""
@@ -684,7 +685,7 @@ def fetch_swepos(
         else:
             print("No valid timestamps found in the file.")
 
-        lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(*pos)
+        lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4979", always_xy=True).transform(*pos)
         if pos:
             print(f"Approximate location: (lat: {lat}, lon: {lon}, h: {h:.3f})")
         else:
@@ -745,30 +746,37 @@ def fetch_swepos(
     return None, None
     
 def station_ppp(
-        data_dir: str|Path,
+        obs_path: str|Path,
+        navglo_path: str|Path = None,
         atx_path: str|Path = None,
         antrec_path: str|Path = None,
         max_downloads: int = 10,
         max_retries: int = 3,
-        output_dir: str|Path = None,
+        out_path: str|Path = None,
         header: bool = True,
         dry: bool = False,
         cont: bool = False
-):
-    data_dir = Path(data_dir)
-    
-    # Set up output_dir
-    if output_dir is None:
-        output_dir = data_dir
-    else:
-        output_dir = Path(output_dir)
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Runs static PPP on a base observation file by first downloading matching precise ephemeris files from gssc.esa.int.
+    Input parameters:
+    - navglo_path: file containing navigation data for GLONASS (can be a merged/general navigation file)
+    - atx_path: file containing absolute calibration data for antennas
+    - antrec_path: file containing absolute calibration data for the base antenna (overrides atx_path for base)
+    - max_downloads: number of parallel downloads that will be attempted
+    - max_retries: number of times a file download is attempted before failing
+    - out_path: file where output is stored (default: next to observation file in a .out file)
+    - header: modify the rinex header with the new position
+    - dry: only show which files would be downloaded
+    - cont: attempts to continue where a previous attempt stopped"""
+    if not obs_path.is_file():
+        raise FileNotFoundError(f"Rinex observation file not found: {obs_path}")
+
+    if not out_path:
+        out_path = obs_path.with_suffix(".out").name
+
+    output_dir = out_path.parent
     output_dir.mkdir(exist_ok=True)
 
-    obs_path = next(f for f in data_dir.glob("*") if re.match(r".*\.(\d{2}O|obs)$", f.name))
-    navglo_path = next(f for f in data_dir.glob("*") if re.match(r".*\.(\d{2}G|glo|d{2}N|nav)$", f.name))
-    if not obs_path:
-        raise FileNotFoundError(f"OBS file missing in {data_dir}")
-    
     start_utc, end_utc, approx_pos = extract_rnx_info(obs_path)
     tmp_dir = output_dir / "TMP"
     if not cont:
@@ -787,7 +795,6 @@ def station_ppp(
         print("done.")
 
     # Set up PPP command
-    out_path = output_dir / obs_path.with_suffix(".out").name
     if not out_path.exists() or not cont:
         sp3_file = next(f for f in output_dir.glob("*.SP3"))
         clk_file = next(f for f in output_dir.glob("*.CLK"))
@@ -813,7 +820,7 @@ def station_ppp(
     print(f"Distance: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
     if header:
         update_rinex_position(obs_path, pos)
-    lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4326", always_xy=True).transform(*pos)
+    lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4979", always_xy=True).transform(*pos)
     settings = Settings()
     mocoref = {
         settings.MOCOREF_LATITUDE: lat,
@@ -822,5 +829,5 @@ def station_ppp(
     }
     with open(output_dir / "mocoref.json", 'w') as f:
         json.dump(mocoref, f, indent=4)
-    return distance
+    return pos, rotation, distance
 

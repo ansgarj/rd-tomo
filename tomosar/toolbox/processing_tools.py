@@ -58,7 +58,8 @@ def fetch_swepos(path, stations, downloads, attempts, output, dry, cont, nav) ->
     )
 
 @click.command()
-@click.argument("data_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("obs_file", type=click.Path(exists=True, path_type=Path))
+@click.option("-n", "--navglo", type=click.Path(exists=True, path_type=Path), default=None, help="Path to navigation data for GLONASS (can be general/merged NAV file)")
 @click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
 @click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
 @click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
@@ -67,10 +68,11 @@ def fetch_swepos(path, stations, downloads, attempts, output, dry, cont, nav) ->
 @click.option("-d", "--dry", is_flag=True, help="Dry run without downloads")
 @click.option("--cont", is_flag=True, help="Continue run after downloads complete")
 @click.option("-x", "--no-header", 'header', is_flag=True, default=True, flag_value=False, help="Do not fodify OBS file header with new position.")
-def station_ppp(data_dir, atx, receiver, downloads, attempts, output, dry, cont, header) -> None:
+def station_ppp(obs_file, navglo, atx, receiver, downloads, attempts, output, dry, cont, header) -> None:
     """Attempt to determine base station position using PPP post processing."""
     run_station_ppp(
-        data_dir=data_dir,
+        obs_path=obs_file,
+        navglo_path=navglo,
         atx_path=atx,
         antrec_path=receiver,
         max_downloads=downloads,

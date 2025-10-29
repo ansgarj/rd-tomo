@@ -700,7 +700,7 @@ def gunzip(input_path: Path|str, output_path: Path|str = None) -> Path:
     return output_path
 
 # Function to read mocoref data from a data file
-def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, pco_offset: float = -0.2, generate: bool = False, verbose: bool = False) -> dict:
+def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, pco_offset: float = -0.2, generate: bool = False, verbose: bool = False) -> tuple[float, float, float, float]:
     """Reads mocoref data from a data file. Valid types: CSV, JSON, LLH and mocoref. If not specified attempts to determine file type from file extension.
     The line parameter specifies which line in a CSV file the mocoref data is read from. Optionally generates a mocoref.moco file.
     
@@ -710,7 +710,13 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
     LLH data read from a file is assumed to lack a header and have identical columns to Reach RS3 output:
     date, time, latitude, longitude, height, Q, satellites, sdn, sde, sdu, sdne, sdeu, sdun, age, AR_ratio
     
-    The pco_offset parameter allows the user to specify a vertical PCO offset between the receiver used to record mocoref data and the receiver used in drone processing."""
+    The pco_offset parameter allows the user to specify a vertical PCO offset between the receiver used to record mocoref data and the receiver used in drone processing.
+    
+    Returns:
+    - latitude
+    - longitude
+    - ellipsoidal height
+    - antenna height"""
 
     # Check if data or data file was passed
     data_file = None

@@ -1,11 +1,15 @@
 import click
 import os
 from datetime import timedelta
+from pathlib import Path
+from pyproj import Transformer
+import math
 
 from .. import ubx2rnx, rnx2rtkp
-from ..gnss import fetch_swepos, station_ppp, read_pos_file
+from ..gnss import fetch_swepos, station_ppp as run_ppp, read_pos_file
 from ..config import LOCAL
 from ..binaries import resource
+from ..utils import mocoref
 
 @click.group()
 def test() -> None:
@@ -40,7 +44,7 @@ def gnss(savar) -> None:
 
         print()
         print("Running station PPP post processing on Swepos files ...")
-        distance = station_ppp("SWEPOS", header=False)
+        _, _, distance = run_ppp(swepos_obs, swepos_nav, header=False)
 
         if distance < 0.2:
             print("TEST: station PPP sucessful")
@@ -61,6 +65,53 @@ def gnss(savar) -> None:
         if q > 95 and dur > timedelta(minutes=10):
             print("TEST: RTKP processing sucessful")
             print()
-            print("GNSS processing operational!")
+            print("GNSS processing OPERATIONAL!")
         else:
             raise RuntimeError("rnx2rtkp produced poor Q1 quality or lost time, check tomosar settings RTKP_CONFIG")
+        
+@test.command()
+@click.argument("base_obs", type=click.Path(exists=True, path_type=Path))
+@click.argument("mocoref_file", type=click.Path(exists=True, path_type=Path))
+@click.option("-n", "--navglo", type=click.Path(exists=True, path_type=Path), default=None, help="Path to GLONASS navigation data file (can be a general/merged NAV file)")
+@click.option("--csv", is_flag=True, help="File is a CSV file (default for .csv and .CSV files)")
+@click.option("--json", is_flag=True, help="File is a JSON file (default for .json and .JSON files)")
+@click.option("--llh", is_flag=True, help="File is an LLH log (default for .llh and .LLH files)")
+@click.option("-l", "--line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
+@click.option("--offset", type=float, default=-0.2, help="Specify vertical PCO between data log receiver and drone processing receiver (default=-0.2)")
+def station_ppp(
+    base_obs: Path,
+    mocoref_file: Path,
+    navglo_path: Path|None,
+    csv: bool, 
+    json: bool,
+    llh: bool,
+    line: int,
+    offset: float,
+) -> None:
+    # Get mocoref position
+    if csv:
+        if json or llh:
+            raise ValueError("Only one of --csv, --json and --llh can be used")
+        type = "CSV"
+    elif json:
+        if llh:
+            raise ValueError("Only one of --csv, --json and --llh can be used")
+        type = "JSON"
+    elif llh:
+        type = "LLH"
+    else:
+        type = None
+    mocoref_latitude, mocoref_longitude, mocoref_height, mocoref_antenna = mocoref(
+        mocoref_file,
+        type=type,
+        line=line,
+        pco_offset=offset
+    )
+
+    mocoref_pos = Transformer.from_crs("epsg:4979", "epsg:4978", always_xy=True).transform(mocoref_longitude, mocoref_latitude, mocoref_height + mocoref_antenna)
+
+    pos, rotation, _ = run_ppp(base_obs, navglo_path=navglo_path, header=False)
+
+    diff = rotation @ [mocoref_pos[0] - pos[0], mocoref_pos[1] - pos[1], mocoref_pos[2] - pos[2]]
+    distance = math.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
+    print(f"Distance: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
