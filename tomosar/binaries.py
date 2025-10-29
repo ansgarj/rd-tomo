@@ -445,25 +445,7 @@ def reach2rnx(ubx_file: str|Path) -> tuple[Path, Path, Path]:
     result = run(["convbin", "-r", "rtcm3", "-od", "-os", "-o", str(obs_path), "-n", str(nav_path), "-s", str(sbs_path), str(ubx_file)])
     print(result.stdout)
     if obs_path.exists():
-        def update_antenna_type(file_path) -> None:
-            with open(file_path, 'r') as file:
-                lines = file.readlines()
-            new_line = "                    EML_REACH_RS3   NONE                    ANT # / TYPE"
-
-            updated = False
-            for i, line in enumerate(lines):
-                if "ANT # / TYPE" in line:
-                    lines[i] = new_line
-                    updated = True
-                    break
-            
-            if not updated:
-                raise RuntimeError("Failed to parse RINEX header.")
-
-            with open(file_path, 'w') as file:
-                file.writelines(lines)
-
-        update_antenna_type(obs_path)
+        _update_antenna(obs_path, antenna="EML_REACH_RS3", radome="NONE")
 
     return obs_path, nav_path, sbs_path
 
