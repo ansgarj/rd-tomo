@@ -359,7 +359,7 @@ def init(
     
     # Initiate preprocessing
     rover_obs, rover_nav, rover_sbs = ubx2rnx(drone_files["Drone GNSS file"])
-    if swepos:
+    if swepos and not elevation_mask:
         elevation_mask = 5
     rtkp(
         rover_obs=rover_obs,
