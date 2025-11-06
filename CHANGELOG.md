@@ -2,14 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.0.6] - 2025-11-06
 
 ### Added
-- `tomosar test station-ppp` which runs `station-ppp` and compares against ground truth as found in a mocoref data file
+- `tomosar test station-ppp` which runs `station-ppp` and compares against ground truth as found in a mocoref data file, can also be run directly on Reach ZIP archives without unpacking them (does not require separate mocoref data)
 - `tomosar.chc2rnx` for converting CHCI83 .HCN file to RINEX in case RINEX files are missing for some reason
 - `tomosar.binaries.tmp` context manager that makes an existing file or directory temporary (the latter including ALL content) or creates a temporary directory, and changed existing functions that downloaded files that were supposed to be temporary to use it
-- `tomosar.gnss.reachz2rnx` and `tomosar extract-reach` that extracts RINEX OBS, `mocoref.moco` and optionally RINEX NAV from a Reach .zip archive
+- `tomosar.gnss.reachz2rnx` and `tomosar extract-reach` that extracts RINEX OBS, `mocoref.moco` and optionally RINEX NAV files from a Reach ZIP archive
 - `tomosar init` to collect files in a data directory and convert to the correct structure for processing, and copying or moving files into a processing directory in such a manner that the data directory is unaltered. Then initiate preprocessing in the processing directory. \[NOT IMPLEMENTED\]: IMU and IMU+GNSS integration and what follows.
+- `tomosar.gnss.rtkp` which calls `tomosar.binaries.rnx2rtkp` and reads the `.pos` file
 
 ### Changed
 - Changed `tomosar.gnss.station_ppp` to take explicit paths to the observation file and optionally the GLONASS navigation data, instead of a data directory, and correspondingly for `tomosar station-ppp`
@@ -17,7 +18,6 @@ All notable changes to this project will be documented in this file.
 - Collected `pyproj.Transformer` objects for ECEF to geodetic and from geodetic to ECEF in `tomosar.transformers`
 - Updated `tomosar.reach2rnx` to correctly handle multiple sites within a single RTCM3 log by splitting the output into multiple RINEX observation files.
 - Renamed `tomosar.utils.mocoref` to `generate_mocoref` 
-- `tomosar test station-ppp` can now be run directly on Reach ZIP archives without unpacking them (does not require separate mocoref data)
 - `tomosar.gnss.station_ppp` and `tomosar station-ppp` now unlinks the ephemeris files after finishing as default (optionally retains them)
 - `tomosar.binaries.merge_rnx` and `tomosar.binaries.merge_eph` no longer performs merge on a single file, but simply returns the single file
 

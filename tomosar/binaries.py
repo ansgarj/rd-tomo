@@ -463,17 +463,21 @@ def merge_eph(eph_files: list[str|Path], force: bool = False) -> tuple[Path|None
 
     return merged_sp3, merged_clk
 
-def ubx2rnx(ubx_file: str|Path, nav: bool = True, sbs: bool = True) -> tuple[Path, Path|None, Path|None]:
+def ubx2rnx(ubx_file: str|Path, nav: bool = True, sbs: bool = True, obs_file: str|Path|None = None) -> tuple[Path, Path|None, Path|None]:
     """Convert a UBX file (drone gnss_logger_dat-[...].bin file) to RINEX."""
-    obs_path = ubx_file.with_suffix(".obs")
+    if obs_file:
+        obs_path = Path(obs_file)
+    else:
+        obs_path = ubx_file.with_suffix(".obs")
+        
     cmd = ["convbin", "-r", "ubx", "-od", "-os", "-o", obs_path]
     if nav:
-        nav_path = ubx_file.with_suffix(".nav")
+        nav_path = obs_path.with_suffix(".nav")
         cmd.extend(["-n", nav_path])
     else:
         nav_path = None
     if sbs:
-        sbs_path = ubx_file.with_suffix(".sbs")
+        sbs_path = obs_path.with_suffix(".sbs")
         cmd.extend(["-s", sbs_path])
     else:
         sbs_path = None
@@ -683,9 +687,14 @@ def _split_by_site_occupation(
 def reach2rnx(rtcm_file: str|Path, reference_date: datetime|None = None, obs_file: str|Path|None = None, single: bool = True, tstart: datetime = None, tend: datetime = None, nav: bool = False, sbs: bool = False, verbose: bool = False) -> tuple[dict|None, Path|None, Path|None]:
     """Convert a Reach RTCM3 file to RINEX with correct header(s). If single is False, produces a separate file for each site,
     otherwise extracts only the site with the longest observation. If tstart and tend are given, only observations
-    within the specified interval count against observation length (but the entire observation time is still recorded)."""
+    within the specified interval count against observation length (but the entire observation time is still recorded).
+    
+    The reference_date parameter is used to get the correct GPS week, and if not provided will be inferred from the filename if
+    possible. Otherwise this will raise a ValueError."""
     rtcm_file = Path(rtcm_file)
-    if not obs_file:
+    if obs_file:
+        obs_file = Path(obs_file)
+    else:
         obs_file = rtcm_file.with_suffix(".obs")
 
     if not reference_date:
@@ -697,12 +706,12 @@ def reach2rnx(rtcm_file: str|Path, reference_date: datetime|None = None, obs_fil
     with tmp(rtcm_file.with_name(rtcm_file.stem + "_OBS.tmp")) as obs_path:
         cmd = ["convbin", "-r", "rtcm3", "-od", "-os", '-tr', reference_date.strftime('%Y/%m/%d'), reference_date.strftime('%H:%M:%S'), "-o", obs_path]
         if nav:
-            nav_path = obs_path.with_suffix(".nav")
+            nav_path = obs_file.with_suffix(".nav")
             cmd.extend(["-n", nav_path])
         else:
             nav_path = None
         if sbs:
-            sbs_path = obs_path.with_suffix(".sbs")
+            sbs_path = obs_file.with_suffix(".sbs")
             cmd.extend(["-s", sbs_path])
         else:
             sbs_path = None
@@ -720,23 +729,26 @@ def reach2rnx(rtcm_file: str|Path, reference_date: datetime|None = None, obs_fil
             if verbose or Settings().VERBOSE:
                 print(f"{obs_path} generated the following corrected RINEX OBS file(s):")
                 for file in obs_files:
-                    print(f"\t{file}")
+                    print(f"{" "*2}{file}")
         else:
             obs_files = None
 
     return obs_files, nav_path, sbs_path
 
-def chc2rnx(hcn_file: str|Path, nav: bool = False, sbs: bool = False) -> tuple[Path, Path|None, Path|None]:
+def chc2rnx(hcn_file: str|Path, nav: bool = False, sbs: bool = False, obs_file: str|Path|None = None) -> tuple[Path, Path|None, Path|None]:
     """Convert a CHCI83 HCN file to RINEX with correct header."""
-    obs_path = hcn_file.with_suffix(".obs")
+    if obs_file:
+        obs_path = Path(obs_file)
+    else:
+        obs_path = hcn_file.with_suffix(".obs")
     cmd = ["convbin", "-r", "nov", "-od", "-os", "-o", obs_path]
     if nav:
-        nav_path = hcn_file.with_suffix(".nav")
+        nav_path = obs_path.with_suffix(".nav")
         cmd.extend(["-n", nav_path])
     else:
         nav_path = None
     if sbs:
-        sbs_path = hcn_file.with_suffix(".sbs")
+        sbs_path = obs_path.with_suffix(".sbs")
         cmd.extend(["-s", sbs_path])
     else:
         sbs_path = None
@@ -975,14 +987,14 @@ def ppp(
         obs_file: str|Path,
         sp3_file: str|Path,
         clk_file: str|Path,
-        out_path: str|Path,
+        out_path: str|Path|None = None,
         navglo_file: str|Path = None,
         atx_file: str|Path = None,
         antrec_file: str|Path = None,
         elevation_mask: float|None = None
     ) -> str:
     """Runs gLAB with static PPP mode to determine the position of a GNSS base from its RINEX observation file.
-    Returns the content of the out file."""
+    Returns the content of the out log of gLAB run, and writes it to out_path if provided."""
     with resource(atx_file, "SATELLITES") as atx:
         antenna_type, radome = _ant_type(obs_file)
         print(f"Detected antenna type: {antenna_type} {radome}")

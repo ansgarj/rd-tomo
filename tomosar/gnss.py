@@ -808,7 +808,7 @@ def station_ppp(
     - antrec_path: file containing absolute calibration data for the base antenna (overrides atx_path for base)
     - max_downloads: number of parallel downloads that will be attempted
     - max_retries: number of times a file download is attempted before failing
-    - out_path: file where output is stored (default: next to observation file in a .out file)
+    - out_path: file where output is stored (if None it is not stored)
     - header: modify the rinex header with the new position
     - dry: only show which files would be downloaded
     - retain: retains downloaded ephemeris data after finishing
@@ -817,6 +817,7 @@ def station_ppp(
         raise FileNotFoundError(f"Rinex observation file not found: {obs_path}")
 
     if out_path:
+        out_path = Path(out_path)
         output_dir = out_path.parent
         output_dir.mkdir(exist_ok=True)
     else:
@@ -837,15 +838,15 @@ def station_ppp(
         out = ""
         print()
         out = ppp(
-        obs_file=obs_path,
-        sp3_file=sp3_file,
-        clk_file=clk_file,
-        out_path=out_path,
-        navglo_file=navglo_path,
-        atx_file=atx_path,
-        antrec_file=antrec_path,
-        elevation_mask=elevation_mask
-    )
+            obs_file=obs_path,
+            sp3_file=sp3_file,
+            clk_file=clk_file,
+            out_path=out_path,
+            navglo_file=navglo_path,
+            atx_file=atx_path,
+            antrec_file=antrec_path,
+            elevation_mask=elevation_mask
+        )
    
     if out_path and not out_path.is_file():
         raise FileNotFoundError(f"Cannot find generated out file: {out_path}")

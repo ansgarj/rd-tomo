@@ -765,7 +765,7 @@ def extract_datetime(filename) -> datetime | None:
     return None
 
 # Function to read mocoref data from a data file
-def generate_mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, pco_offset: float = -0.079, tstart: datetime|None = None, tend: datetime|None = None, tolerance: float = 0.2, generate: bool = True, verbose: bool = False) -> tuple[tuple[float, float, float], Path]:
+def generate_mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, output_dir: Path|str|None = None, line: int = 1, pco_offset: float = -0.079, tstart: datetime|None = None, tend: datetime|None = None, tolerance: float = 0.2, generate: bool = True, verbose: bool = False) -> tuple[tuple[float, float, float], Path]:
     """Reads mocoref data from a data file. Valid types: CSV, JSON, LLH and mocoref. If not specified attempts to determine file type from file extension.
     The line parameter specifies which line in a CSV file the mocoref data is read from. Optionally generates a mocoref.moco file.
     
@@ -812,6 +812,13 @@ def generate_mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: i
                 type = "mocoref"
             else:
                 raise RuntimeError("Failed to interpret file type.")
+    
+    if output_dir:
+        output_dir = Path(output_dir)
+    elif data_file:
+        output_dir = data_file.parent
+    else:
+        output_dir = Path.cwd()
     
     type = type.casefold()
     # Validate type
