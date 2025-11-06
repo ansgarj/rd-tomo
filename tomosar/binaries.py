@@ -414,6 +414,8 @@ def _generate_merged_filenames(files: list[Path]) -> Path | None:
     return descriptive_filenames[0] if descriptive_filenames else None
 
 def merge_rnx(rnx_files: list[str|Path], force: bool = False) -> Path|None:
+    if len(rnx_files) == 1:
+        return rnx_files[0]
     merged_file = _generate_merged_filenames(rnx_files)
     if merged_file and merged_file.exists() and not force:
         print(f"Discovered merged file {local (merged_file)}. Aborting merge of RNX files.")
@@ -431,6 +433,8 @@ def merge_eph(eph_files: list[str|Path], force: bool = False) -> tuple[Path|None
     merged_sp3 = _generate_merged_filenames(sp3_files)
     if merged_sp3 and  merged_sp3.exists() and not force:
         print(f"Discovered merged file {local(merged_sp3)}. Aborting merge of .SP3 files.")
+    elif len(sp3_files) == 1:
+        merged_sp3 = sp3_files[0]
     else:
         print(f"Merging .SP3 files > {local(merged_sp3)} ...", end=" ", flush=True)
         with merged_sp3.open("w", encoding="utf-8") as out_file:
@@ -446,6 +450,8 @@ def merge_eph(eph_files: list[str|Path], force: bool = False) -> tuple[Path|None
     merged_clk = _generate_merged_filenames(clk_files)
     if merged_clk and  merged_clk.exists() and not force:
         print(f"Discovered merged file {local(merged_clk)}. Aborting merge of .CLK files.")
+    elif len(clk_files) == 1:
+        merged_clk = clk_files[0]
     else:
         print(f"Merging .CLK files > {local(merged_clk)} ...", end=" ", flush=True)
         with merged_clk.open("w", encoding="utf-8") as out_file:
@@ -472,8 +478,13 @@ def ubx2rnx(ubx_file: str|Path, nav: bool = True, sbs: bool = True) -> tuple[Pat
     else:
         sbs_path = None
     cmd.append(ubx_file)
-    result = run(cmd)
-    print(result.stdout)
+    print(f"Converting {local(ubx_file)} > {local(obs_path)}", end="")
+    if nav:
+        print(f", {local(nav_path)}", end="")
+    if sbs:
+        print(f", {local(sbs_path)}", end="")
+    print()
+    run(cmd)
 
     return obs_path, nav_path, sbs_path
 
@@ -696,11 +707,20 @@ def reach2rnx(rtcm_file: str|Path, reference_date: datetime|None = None, obs_fil
         else:
             sbs_path = None
         cmd.append(rtcm_file)
-        result = run(cmd)
-        print(result.stdout)
+        print(f"Converting {local(rtcm_file)} > {local(obs_path)}", end="")
+        if nav:
+            print(f", {local(nav_path)}", end="")
+        if sbs:
+            print(f", {local(sbs_path)}", end="")
+        print()
+        run(cmd)
         if obs_path.exists():
             _update_antenna(obs_path, antenna="EML_REACH_RS3", radome="NONE", verbose=verbose)
             obs_files = _split_by_site_occupation(obs_path, output_path=obs_file, single=single, tstart=tstart, tend=tend, verbose=verbose)
+            if verbose or Settings().VERBOSE:
+                print(f"{obs_path} generated the following corrected RINEX OBS file(s):")
+                for file in obs_files:
+                    print(f"\t{file}")
         else:
             obs_files = None
 
@@ -721,8 +741,13 @@ def chc2rnx(hcn_file: str|Path, nav: bool = False, sbs: bool = False) -> tuple[P
     else:
         sbs_path = None
     cmd.append(hcn_file)
-    result = run(cmd)
-    print(result.stdout)
+    print(f"Converting {local(hcn_file)} > {local(obs_path)}")
+    if nav:
+            print(f", {local(nav_path)}", end="")
+    if sbs:
+        print(f", {local(sbs_path)}", end="")
+    print()
+    run(cmd)
     if obs_path.exists():
         _update_antenna(obs_path, antenna="CHCI83", radome="NONE")
 

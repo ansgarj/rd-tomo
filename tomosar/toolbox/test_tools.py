@@ -72,7 +72,7 @@ def gnss(savar) -> None:
         
 @test.command()
 @click.argument("target", type=click.Path(exists=True, path_type=Path))
-@click.argument("-m", "--mocoref", "mocoref_file", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("-m", "--mocoref", "mocoref_file", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("-n", "--navglo", "navglo_path", type=click.Path(exists=True, path_type=Path), default=None, help="Path to GLONASS navigation data file (can be a general/merged NAV file)")
 @click.option("-z", "--zip", "is_zip", is_flag=True, help="TARGET is a Reach ZIP archive (default for .zip files)")
 @click.option("--csv", is_flag=True, help="Mocoref file is a CSV file (default for .csv and .CSV files)")
@@ -96,7 +96,9 @@ def station_ppp(
     if target.suffix == ".zip" or is_zip:
         # Assume Reach ZIP archive
         with tmp(target.parent / "tmp", allow_dir=True) as tmp_dir:
-            _, (obs_file, mocoref_file, nav_file) = reachz2rnx(target, output_dir=tmp_dir, )
+            obs_data, (obs_file, mocoref_file, nav_file) = reachz2rnx(target, output_dir=tmp_dir, rnx_file=ref, nav=True, verbose=True)
+            (mocoref_latitude, mocoref_longitude, mocoref_height) = obs_data[mocoref_file]
+            pos, rotation, _ = run_ppp(obs_file, nav_file, header=False, retain=False, make_mocoref=False)
     else:
         if not mocoref_file:
             raise FileNotFoundError(f"To test station-ppp on a RINEX OBS file, specify a mocoref file by --mocoref")

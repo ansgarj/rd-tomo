@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - Renamed `tomosar.utils.mocoref` to `generate_mocoref` 
 - `tomosar test station-ppp` can now be run directly on Reach ZIP archives without unpacking them (does not require separate mocoref data)
 - `tomosar.gnss.station_ppp` and `tomosar station-ppp` now unlinks the ephemeris files after finishing as default (optionally retains them)
+- `tomosar.binaries.merge_rnx` and `tomosar.binaries.merge_eph` no longer performs merge on a single file, but simply returns the single file
 
 ### Fixed
 - Fixed bug in `tomosar forge` related to datetime filtering

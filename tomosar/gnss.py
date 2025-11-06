@@ -823,7 +823,7 @@ def station_ppp(
         output_dir = obs_path.parent
 
     start_utc, end_utc, approx_pos, antenna_delta = extract_rnx_info(obs_path)
-    with tmp(output_dir / "TMP", allow_dir=True) as tmp_dir:
+    with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
         failed = fetch_sp3_clk(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, max_workers=max_downloads, max_retries=max_retries, dry=dry)
         if failed:
             raise FileNotFoundError("Download of precise ephemeris and clock data from ESA failed.")
@@ -887,10 +887,13 @@ def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_d
     is set from this OBS if parsing from the filename fails and it is not specified by user).
     
     Returns:
-    - Dict indexed by paths to files produced with nested dict keys:
-        - OBS PATH: APPROX POS XYZ, TIME OF FIRST OBS, TIME OF LAST OBS
-        - MOCOREF PATH: POSITION
-        - NAV PATH: None
+    - Dict indexed by paths to files produced:
+        - OBS PATH: dict with keys:
+            - APPROX POS XYZ
+            - TIME OF FIRST OBS
+            - TIME OF LAST OBS
+        - MOCOREF PATH: mocoref position (lat, lon, h)
+        - NAV PATH: True (exists only if nav file was extracted)
     - Tuple of paths: (OBS PATH, MOCOREF PATH, NAV PATH or None)"""
 
     archive = Path(archive)
@@ -968,9 +971,7 @@ def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_d
             
             # Verify success and add to obs_data
             if mocoref_file.is_file():
-                obs_data[mocoref_file] = {
-                    "POSITION": mocoref_data
-                }
+                obs_data[mocoref_file] = mocoref_data
             else:
                 warn(f"No mocoref.moco file could be extracted from archive LLH log: {llh_file}")
         else:
@@ -983,7 +984,7 @@ def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_d
                 nav_file = obs_file.with_suffix(".nav")
                 
                 # Add to obs_data
-                obs_data[nav_file] = {}
+                obs_data[nav_file] = True
             else:
                 warn(f"No NAV data found in archive: {archive}")
                 nav_file = None
