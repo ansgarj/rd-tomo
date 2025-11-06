@@ -3,9 +3,11 @@
 All CLI tools in the **TomoSAR** toolbox are accessed as subcommands of the `tomosar` command which is installed by `pip` when you install the `tomosar` module.  Run `tomosar manual` to print this manual and `tomosar changelog` to print the changelog. You can also add `--help` to `tomosar` or any of the subcommands for basic syntax.
 
 ## `setup`
-Running `tomosar setup` ensures that your current installation is up to date. It makes sure all Git hooks are installed, checks if the `pyproject.toml` file was changed in the last merge (or last commit if no merge exists) and warns you to reinstall via `pip` if it was, updates the version file, checks if all required binaries can be found in the `PATH` and pre-warms the Python cache.
+Running `tomosar setup` ensures that your current installation is up to date. It makes sure all Git hooks are installed, checks if the `pyproject.toml` file has changed since last time `make install` or `make update` was run, and runs `make update` if necessary (or prompts you to do it if it fails), updates the version file, checks if all required binaries can be found in the `PATH` and pre-warms the Python cache.
 
-You can perform the dependency check independently by running `tomosar depedencies` and you can always pre-warm the Python cache by running `tomosar warmup`.\
+If the Git hooks are installed (as they are if you run `make install` or `tomosar setup`) then `tomosar setup` is automatically run when you pull and push.
+
+You can perform the dependency check independently by running `tomosar dependencies` and you can always pre-warm the Python cache by running `tomosar warmup`.
 
 ## `version`
 Running `tomosar version` prints the current installed version. If the dynamic versioning differs, it will warn and prompt you to run `tomosar setup` to update the versioning. This can safely be ignored if you are working on your own code. 
@@ -31,7 +33,7 @@ Running `tomosar fetch-swepos` on a drone `gnss_logger_dat-[...].bin` file or RI
 ## `station-ppp`
 Running `tomosar station-ppp` on a GNSS base station RINEX observation file will run static PPP post-processing on the observation file to determine a better approximation of its position than what is provided in the RINEX header, and will update the header by default.
 
-**Note**: this function, while operational, is currently buggy and does not deliver good results. When fixed it can be used as a fallback if we lack an "exact" position of the GNSS base station.
+**Note**: this function, while operational, still needs some tweaking, but can be used as a fallback if we lack an "exact" position of the GNSS base station.
 
 ## `mocoref`
 Running `tomosar mocoref` on a data file (CSV, JSON or LLH) generates a `mocoref.moco` file. For a CSV file it defaults to the first line, but this can be changed with `--line`, and reads columns with names matching the names specified in the settings. A JSON file is assumed to contain a dict with the keys specified in the settings. A LLH log is assumed to have no header and to have columns matching the LLH log from the Emlid Reach RS3. 
@@ -43,7 +45,9 @@ Running `tomosar load` loads a single _Tomogram Directory_ or multiple _Tomogram
 Running `tomosar sliceinfo` scans a directory for slice files and collects them into a `SliceInfo` object, and then opens an interactive Python console with the `SliceInfo` object stored under `slices`. It can be used as an entry point instead of having to manually import and run inside Python where path auto-completion may not work. 
 
 ## `test`
-The `tomosar test` subcommand contains additional subcommands that can be used to test e.g. config files or to verify that all third party binaries are operational. Currently the only test available is `tomosar test gnss`.
+The `tomosar test` subcommand contains additional subcommands that can be used to test e.g. config files or to verify that all third party binaries are operational. Currently available are:
+- `tomosar test gnss` which tests that all GNSS processing capabilities are operational
+- `tomosar test station-ppp` which tests `station-ppp` against ground truth as found in a `mocoref` data file
 
 ## Planned additions
 1. `tomosar init` \[**NOT IMPLEMENTED**\] directly generates a processing directory from a _Data Directory_. It will identify what files are present, if necessary generate a `mocoref.moco` file from a CSV file or `.json` file or if necessary subsititute for a missing mocoref data by running `ppp` on the GNSS base station observation file, or subsitute for missing GNSS base station files by downloading rinex files from _Swepos_ using `swepos`. Then it will copy all necessary files into a processing directory located inside the folder pointed to by the `PROCESSING_DIRS` setting (**default**: `$HOME/Radar/Processing`). The generated directory will have the correct file structure for **Radaz** functions. Finally `tomprocess init` initiates preprocessing in the processing directory. **Note**: if run inside a processing directory, simply initiaties preprocessing.
@@ -52,6 +56,5 @@ The `tomosar test` subcommand contains additional subcommands that can be used t
 4. `tomosar view` \[**NOT IMPLEMENTED**\] contains multiple subcommands used for viewing tomograms, statistics, e.t.c 
 5. `tomosar optimize` \[**NOT IMPLEMENTED**\] plans a flight for optimizing _nominal_ SAR parameters according to given restraints.
 6. `tomosar plan` \[**NOT IMPLEMENTED**\] interactively models a _planned flight_ to allow validation of ideal SAR parameters across different tomograms (**Note**: this does not take into account flight instabilities that can occur during the actual flight).
-7. `tomosar test station-ppp` \[**NOT IMPLEMENTED**\] tests base station PPP performance against ground truth as given in a `mocoref.moco` file.
-8. `tomosar fetch-data` \[**NOT IMPLEMENTED**\] fetches the **most recent** _drone data_ and generates a _Data Directory_ inside the folder pointed to by the `DATA_DIRS` setting (**default**: `$HOME/Radar/Data`)
-9. `tomoprocess analysis` \[**NOT IMPLEMENTED**\] analyzes the spiral flights and models them. Used to verify _idealized flight_ vs. _planned flight_, and to inspect _realized flight_ parameters, including anisotropies from flight instabilities. Can provide optimal processing parameters for `tomo`/`slice`. 
+7. `tomosar fetch-data` \[**NOT IMPLEMENTED**\] fetches the **most recent** _drone data_ and generates a _Data Directory_ inside the folder pointed to by the `DATA_DIRS` setting (**default**: `$HOME/Radar/Data`)
+8. `tomoprocess analysis` \[**NOT IMPLEMENTED**\] analyzes the spiral flights and models them. Used to verify _idealized flight_ vs. _planned flight_, and to inspect _realized flight_ parameters, including anisotropies from flight instabilities. Can provide optimal processing parameters for `tomo`/`slice`. 

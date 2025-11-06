@@ -102,8 +102,8 @@ class Beam:
 
 # Settings
 class Settings:
-    def __init__(self):
-        if SETTINGS_PATH.exists() and SETTINGS_PATH.is_file():
+    def __init__(self) -> None:
+        if SETTINGS_PATH.is_file():
             with open(SETTINGS_PATH, "r") as file:
                 self.data = json.load(file)
         else:
@@ -111,7 +111,7 @@ class Settings:
             self.data = DEFAULT
 
     @property
-    def VERBOSE(self):
+    def VERBOSE(self) -> bool:
         return self.data["VERBOSE"]
     
     @VERBOSE.setter
@@ -121,7 +121,7 @@ class Settings:
         self.data["VERBOSE"] = value
 
     @property
-    def MOCOREF_LONGITUDE(self):
+    def MOCOREF_LONGITUDE(self) -> str:
         return self.data["MOCOREF_LONGITUDE"]
     
     @MOCOREF_LONGITUDE.setter
@@ -131,7 +131,7 @@ class Settings:
         self.data["MOCOREF_LONGITUDE"] = value
 
     @property
-    def MOCOREF_LATITUDE(self):
+    def MOCOREF_LATITUDE(self) -> str:
         return self.data["MOCOREF_LATITUDE"]
     
     @MOCOREF_LATITUDE.setter
@@ -141,7 +141,7 @@ class Settings:
         self.data["MOCOREF_LATITUDE"] = value
 
     @property
-    def MOCOREF_HEIGHT(self):
+    def MOCOREF_HEIGHT(self) -> str:
         return self.data["MOCOREF_HEIGHT"]
     
     @MOCOREF_HEIGHT.setter
@@ -151,7 +151,7 @@ class Settings:
         self.data["MOCOREF_HEIGHT"] = value
 
     @property
-    def MOCOREF_ANTENNA(self):
+    def MOCOREF_ANTENNA(self) -> str:
         return self.data["MOCOREF_ANTENNA"]
     
     @MOCOREF_ANTENNA.setter
@@ -194,7 +194,7 @@ class Settings:
          
     @property
     def PROCESSING_DIRS(self) -> Path:
-        dirs = self.data["PROCESSING_DIRS"]
+        dirs = Path(self.data["PROCESSING_DIRS"])
         dirs.mkdir(parents=True, exist_ok=True)
         return dirs
     
@@ -210,7 +210,7 @@ class Settings:
     
     @property
     def TOMO_DIRS(self) -> Path:
-        dirs = self.data["TOMO_DIRS"]
+        dirs = Path(self.data["TOMO_DIRS"])
         dirs.mkdir(parents=True, exist_ok=True)
         return dirs
     
@@ -225,11 +225,11 @@ class Settings:
         self.data["TOMO_DIRS"] = str(path.resolve())
     
     @property
-    def SWEPOS_LOGIN(self):
+    def SWEPOS_LOGIN(self) -> dict:
         return self.data["SWEPOS_LOGIN"]
     
     @property
-    def SWEPOS_USERNAME(self):
+    def SWEPOS_USERNAME(self) -> str|None:
         return self.SWEPOS_LOGIN["USERNAME"]
     
     @SWEPOS_USERNAME.setter
@@ -239,7 +239,7 @@ class Settings:
         self.data["SWEPOS_LOGIN"]["USERNAME"] = value
 
     @property
-    def SWEPOS_PASSWORD(self):
+    def SWEPOS_PASSWORD(self) -> str|None:
         return self.SWEPOS_LOGIN["PASSWORD"]
     
     @SWEPOS_PASSWORD.setter
@@ -262,7 +262,7 @@ class Settings:
         self.data["SWEPOS_COORDINATES"] = str(path.resolve())
 
     @property
-    def FILES(self):
+    def FILES(self) -> dict:
         return self.data["FILES"]
 
     def add(self, key: str, files: str|Path|list[str|Path], **kwargs) -> None:
@@ -317,10 +317,6 @@ class Settings:
             case "MASK":
                 key = "MASKS"
             case "RECEIVER":
-                if len(files) > 1:
-                    raise ValueError("Only one RECEIVER can be rmoved at a time")
-                else:
-                    file = files[0]
                 antenna = kwargs.get("antenna", None)
                 if antenna == "SATELLITES":
                     raise KeyError("The SATELLITES file cannot be removed.")
@@ -329,7 +325,7 @@ class Settings:
                 radome = kwargs.get("radome", "NONE")
                 if antenna in self.ANTENNAS:
                     self.ANTENNAS[antenna].pop(radome, None)
-                    if not self.ANTEENNAS[antenna]:
+                    if not self.ANTENNAS[antenna]:
                         self.ANTENNAS.pop(antenna, None)
                 return
         
@@ -337,23 +333,23 @@ class Settings:
         self.set(key, [file for file in old_files if file not in files])
 
     @property
-    def DEMS(self):
+    def DEMS(self) -> list[str]:
         return self.FILES["DEMS"]
        
     @property
-    def CANOPIES(self):
+    def CANOPIES(self) -> list[str]:
         return self.FILES["CANOPIES"]
     
     @property
-    def MASKS(self):
+    def MASKS(self) -> list[str]:
         return self.FILES["MASKS"]
     
     @property
-    def ANTENNAS(self):
+    def ANTENNAS(self) -> dict:
         return self.FILES["ANTENNAS"]
     
     @property
-    def SATELLITES(self):
+    def SATELLITES(self) -> Path:
         path = self.ANTENNAS.get("SATELLITES", None)
         if path is None:
             return None
@@ -369,7 +365,7 @@ class Settings:
         self.ANTENNAS["SATELLITES"] = str(path.resolve())
 
     @property
-    def RECEIVERS(self):
+    def RECEIVERS(self) -> dict:
         return {key: value for key, value in self.ANTENNAS.items() if key != "SATELLITES"}
     
     @RECEIVERS.setter
@@ -390,7 +386,7 @@ class Settings:
             return self.RECEIVERS.get(receiver_id, {})
         
     @property
-    def RADAR(self):
+    def RADAR(self) -> dict:
         return self.data["RADAR"]
     
     def get(self, key: str):       
@@ -445,9 +441,6 @@ DEFAULT = {
     "FILES": {
         "ANTENNAS": {
             "SATELLITES": internal_file("SATELLITES"),
-            "CHCI83": {
-                "NONE": internal_file("CHCI83")
-            }
         },
         "DEMS": [],
         "CANOPIES": [],

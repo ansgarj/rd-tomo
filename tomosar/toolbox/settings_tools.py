@@ -138,6 +138,8 @@ def add(key, files, antenna: str|None, radome: str) -> None:
     """Add files or folders to TomoSAR. Valid keys are:
     DEM, DEMS, CANOPY, CANOPIES, MASK, MASKS, RECEIVER"""
     settings = Settings()
+    # Convert to list
+    files = [file for file in files]
     settings.add(key, files, antenna=antenna, radome=radome)
     settings.save()
 
@@ -150,5 +152,7 @@ def remove(key, files, antenna: str|None, radome: str) -> None:
     """Remove files or folders from TomoSAR. Valid keys are:
     DEM, DEMS, CANOPY, CANOPIES, MASK, MASKS, RECEIVER"""
     settings = Settings()
+    # Convert to list
+    files = [file for file in files]
     settings.remove(key, files, antenna=antenna, radome=radome)
     settings.save()

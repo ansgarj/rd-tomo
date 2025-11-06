@@ -66,7 +66,7 @@ The CLI tools are intended to provide a toolbox for the most common or predicted
 ### Settings
 The local _TomoSAR_ settings are stored inside the `.local` folder inside the project directory in a `settings.json` file. The current settings can be viewed with `tomosar settings` which prints to stdout.
 
-`FILES: ANTENNAS` can be used to point to antenna files containing absolute calibration data for the receiver antenna if not included in the `FILES: ANTENNAS: SATELLITES` file. Add files with `tomosar add RECEIVER` or change the `SATELLITES` file with `tomosar set SATELLITES`. **Note**: if a `RECEIVER` file is not specified for a specific antenna, _TomoSAR_ will look inside the `SATELLITES` file as a fallback. **Note 2**: The internal file for the CHCI83 receiver contains **unverified** calibration data (copied from GPS to other constellations). 
+`FILES: ANTENNAS` can be used to point to antenna files containing absolute calibration data for the receiver antenna if not included in the `FILES: ANTENNAS: SATELLITES` file. Add files with `tomosar add RECEIVER` or change the `SATELLITES` file with `tomosar set SATELLITES`. **Note**: if a `RECEIVER` file is not specified for a specific antenna, _TomoSAR_ will look inside the `SATELLITES` file as a fallback. **Note 2**: The internal file for the CHCI83 receiver contains **unverified** calibration data (copied from GPS to other constellations), and causes PPP to fail.
 
 Note that you can set login info for the Swepos network (so you don't have to specify manually) by `tomosar set SWEPOS_USERNAME` and `tomosar set SWEPOS_PASSWORD`, but that the password is stored inside `settings.json` in an **unencrypted state**. Use therefore with caution. 
 

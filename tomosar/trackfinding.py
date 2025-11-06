@@ -452,7 +452,7 @@ def modify_radar_inf(path: Path, info: dict, dry: bool = False):
         f.write(" ".join(t_end) + "\n")
         f.write(" ".join(radar_inf[24:-2]) + "             " + " ".join(radar_inf[-2:]))
 
-def _extract_timestamp(filename):
+def _extract_timestamp(filename) -> tuple[str|None, str|None]:
     # Match pattern like 2025-09-02-18-10-42
     match = re.search(r'(\d{4}-\d{2}-\d{2})-(\d{2}-\d{2}-\d{2})', filename)
     if match:

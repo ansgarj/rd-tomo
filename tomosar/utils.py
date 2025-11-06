@@ -1,5 +1,8 @@
 # Imports
 import os
+import subprocess
+import shutil
+import platform
 import re
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
@@ -13,8 +16,9 @@ from scipy.optimize import least_squares
 from scipy.ndimage import binary_closing
 from sklearn.linear_model import RANSACRegressor, LinearRegression
 from sklearn.cluster import DBSCAN
+import json
 import inspect
-from datetime import timedelta, datetime, date, time
+from datetime import timedelta, datetime, date, time, timezone
 import math
 from collections import defaultdict
 from ftplib import FTP, error_perm
@@ -23,18 +27,15 @@ from pathlib import Path
 import gzip
 import code
 import sys
+import inspect
 import hashlib
-import json
-from pyproj import Transformer
 
 from .tomogram_processing import circularize
+from .transformers import geo_to_ecef, ecef_to_geo
 from .config import Settings
 
-# Custom warnings
-import inspect
-import sys
-
-def warn(message):
+# Warning message
+def warn(message) -> None:
     # Get the current stack
     stack = inspect.stack()
 
@@ -57,6 +58,22 @@ def warn(message):
 
     print(f"{YELLOW}{filename}:{lineno} in {caller_func}(): {message}{RESET}", file=sys.stderr)
 
+# Localize a path(s) if possible
+def local(paths: list[Path|str]|Path|str, root: Path|str = '.') -> list[str] | str:
+    """Returns a string representation of specified path(s) relative the root directory (default: CWD)"""
+    def localize(path: Path|str, root: Path = Path.cwd()) -> str:
+        if path is None:
+            return None
+        path = Path(path)
+        try:
+            return str(path.relative_to(root))
+        except:
+            return str(path)
+    root = Path(root).resolve()
+    if not isinstance(paths, list):
+        return localize(paths, root)
+    return [localize(p, root) for p in paths]
+
 # Load interactive console
 def interactive_console(var_dict: dict) -> None:
     pink = "\033[95m"
@@ -78,7 +95,47 @@ def interactive_console(var_dict: dict) -> None:
 
     # Launch console with variables available
     code.interact(banner=banner, local=var_dict)
-    
+
+def drop_into_terminal(target_dir: str|Path) -> None:
+    target_dir = os.path.abspath(target_dir)
+    system = platform.system()
+
+    if system == "Windows":
+        # Launch a new cmd.exe window detached from Python
+        subprocess.Popen(
+            ["cmd.exe"],
+            cwd=target_dir,
+            creationflags=subprocess.CREATE_NEW_CONSOLE
+        )
+
+    elif system == "Darwin":  # macOS
+        # Use AppleScript to open Terminal.app in the target directory
+        script = f'''
+        tell application "Terminal"
+            do script "cd '{target_dir}'; exec $SHELL -i"
+            activate
+        end tell
+        '''
+        subprocess.Popen(["osascript", "-e", script])
+
+    elif system == "Linux":
+        # Try common terminal emulators
+        for terminal in ["gnome-terminal", "xfce4-terminal", "konsole", "xterm"]:
+            if shutil.which(terminal):
+                if terminal == "xterm":
+                    subprocess.Popen([terminal, "-e", f"bash -i"], cwd=target_dir)
+                else:
+                    subprocess.Popen([
+                        terminal,
+                        "--working-directory", target_dir,
+                        "--", "bash", "-i"
+                    ])
+                return
+        raise RuntimeError("No supported terminal emulator found on Linux.")
+
+    else:
+        raise RuntimeError(f"Unsupported platform: {system}")
+        
 # Hashing
 def changed(hash_file: Path|str, input: list[Path|str]|Path|str, generate_hash: bool = True) -> bool:
     """Generates hash from input and compare against hash stored in hash file.
@@ -621,7 +678,7 @@ def update_nested_dict(original: dict, updates: dict) -> dict:
             original[key] = subdict  # Add new key or overwrite non-dict
     return original
 
-def invert_nested_dict(nested):
+def invert_nested_dict(nested: dict) -> dict:
     # Get all outer keys
     outer_keys = set(nested.keys())
 
@@ -699,8 +756,16 @@ def gunzip(input_path: Path|str, output_path: Path|str = None) -> Path:
     input_path.unlink()  # Delete the original .gz file
     return output_path
 
+def extract_datetime(filename) -> datetime | None:
+    """Matches pattern like 2025-09-02-18-10-42 and returns a matching timezone aware datetime object (UTC)"""
+    match = re.search(r'\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}', filename)
+    if match:
+       dt = datetime.strptime(match.group(), "%Y-%m-%d-%H-%M-%S")
+       return dt.replace(tzinfo = timezone.utc)
+    return None
+
 # Function to read mocoref data from a data file
-def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, pco_offset: float = -0.2, generate: bool = False, verbose: bool = False) -> tuple[float, float, float, float]:
+def generate_mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, pco_offset: float = -0.079, tstart: datetime|None = None, tend: datetime|None = None, tolerance: float = 0.2, generate: bool = True, verbose: bool = False) -> tuple[tuple[float, float, float], Path]:
     """Reads mocoref data from a data file. Valid types: CSV, JSON, LLH and mocoref. If not specified attempts to determine file type from file extension.
     The line parameter specifies which line in a CSV file the mocoref data is read from. Optionally generates a mocoref.moco file.
     
@@ -708,9 +773,13 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
     A DataFrame will be interpreted as having the mocoref data in a single line if the line parameter is positive, and as being an LLH log if it is zero.
     
     LLH data read from a file is assumed to lack a header and have identical columns to Reach RS3 output:
-    date, time, latitude, longitude, height, Q, satellites, sdn, sde, sdu, sdne, sdeu, sdun, age, AR_ratio
+    date, time, latitude, longitude, height, Q, satellites, sdn, sde, sdu, sdne, sdeu, sdun, age, AR_ratio.
+
+    If tstart and/or tend are specified the LLH data will be limited to matching timestamps, otherwise the entire log is used. Note however that from within the timestamps used,
+    there is extracted the position which gives the LONGEST TOTAL FIX with a tolerance of position variation specified by the tolerance parameter.
     
     The pco_offset parameter allows the user to specify a vertical PCO offset between the receiver used to record mocoref data and the receiver used in drone processing.
+    Note: this applies to CSV files ONLY.
     
     Returns:
     - latitude
@@ -739,7 +808,7 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
                 type = "JSON"
             elif data_file.suffix in (".LLH", ".llh"):
                 type = "LLH"
-            elif data_file.suffix in (".moco"):
+            elif data_file.name == "mocoref.moco":
                 type = "mocoref"
             else:
                 raise RuntimeError("Failed to interpret file type.")
@@ -753,7 +822,7 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
     # Get mocoref data 
     settings = Settings()
     match type:
-        case "csv" | "CSV":
+        case "csv":
             # Read data from file
             if data_file:
                 data = pd.read_csv(data_file)
@@ -782,7 +851,7 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
             # Modify antenna offset to account for difference between RS3 and CHCI83 PCO:
             mocoref_antenna = mocoref_antenna + pco_offset
 
-        case "json" | "JSON":
+        case "json":
             # Read data from file
             if data_file:
                 data = json.load(data_file)
@@ -801,7 +870,7 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
             mocoref_longitude = data[settings.MOCOREF_LONGITUDE]
             mocoref_height = data[settings.MOCOREF_HEIGHT]
             mocoref_antenna = data[settings.MOCOREF_ANTENNA]
-        case "llh" | "LLH":
+        case "llh":
             # Read data from file
             if data_file:
                 data = pd.read_csv(data_file, sep=r'\s+',  names=['date','time', settings.MOCOREF_LATITUDE, settings.MOCOREF_LONGITUDE,
@@ -816,17 +885,20 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
             if settings.MOCOREF_HEIGHT not in data:
                 raise KeyError(f"{settings.MOCOREF_HEIGHT} key not found in {data_file}")
             
+            # Extract matching timestamps if a RINEX file is provided:
+            if tstart or tend:
+                data['timestamp'] = pd.to_datetime(data['date'] + ' ' + data['time'], format='%Y/%m/%d %H:%M:%S.%f', utc=True)
+                if tstart:
+                    data = data[data['timestamp'] >= tstart]
+                if tend:
+                    data = data[data['timestamp'] <= tend]
             # LLH logs record phase center position
             mocoref_antenna = 0
             
             # If quality is specified limit to Q=1 if present and find most dense cluster of continuous segments
             if 'quality' in data and np.where(data['quality'] == 1):
-                data = data.iloc[np.where(data['quality'] == 1)]    
-
-                # Transformer to ECEF coordinates
-                to_ecef = Transformer.from_crs("epsg:4979", "epsg:4978", always_xy=True)
-                to_geodetic = Transformer.from_crs("epsg:4978", "epsg:4979", always_xy=True)
-
+                data = data.iloc[np.where(data['quality'] == 1)]
+                
                 # Weight and mean for each continuous segment in ECEF
                 idiff = np.diff(data.index)
                 split_points = np.where(idiff > 1)[0]
@@ -837,7 +909,7 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
                     end = point + 1
                     segment = data.iloc[start:end]
                     weights.append(len(segment))
-                    points.append(to_ecef.transform(
+                    points.append(geo_to_ecef.transform(
                         segment[settings.MOCOREF_LONGITUDE].mean(),
                         segment[settings.MOCOREF_LATITUDE].mean(),
                         segment[settings.MOCOREF_HEIGHT].mean()
@@ -845,7 +917,7 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
                     start = end
                 segment = data.iloc[start:]
                 weights.append(len(segment))
-                points.append(to_ecef.transform(
+                points.append(geo_to_ecef.transform(
                     segment[settings.MOCOREF_LONGITUDE].mean(),
                     segment[settings.MOCOREF_LATITUDE].mean(),
                     segment[settings.MOCOREF_HEIGHT].mean()
@@ -856,8 +928,7 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
                 points = np.array(points)
 
                 # Use DBSCAN clustering to find dense regions within the threshold
-                threshold = 0.2  # meters
-                db = DBSCAN(eps=threshold, min_samples=1, metric='euclidean')
+                db = DBSCAN(eps=tolerance, min_samples=1, metric='euclidean')
                 labels = db.fit_predict(points)
 
                 # Find the cluster with maximum total weight
@@ -877,21 +948,22 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
 
                 # Perform weighted mean
                 pos = np.sum(weights[:, np.newaxis] * points, axis=0) / np.sum(weights)
-                mocoref_longitude, mocoref_latitude, mocoref_height = to_geodetic.transform(*pos)
+                mocoref_longitude, mocoref_latitude, mocoref_height = ecef_to_geo.transform(*pos)
             else:
                 mocoref_latitude = data[settings.MOCOREF_LATITUDE].mean()
                 mocoref_longitude = data[settings.MOCOREF_LONGITUDE].mean()
                 mocoref_height = data[settings.MOCOREF_HEIGHT].mean()
         case "mocoref":
+            generate = False
             if not data_file:
                 raise RuntimeError("No mocoref file was specified")
             with open(data_file, 'r') as file:
                 lines = file.readlines()
             value = re.compile(r"\d+(?:[\.\,]\d*)?")
-            mocoref_antenna = float(value.search(lines[3]))
-            mocoref_latitude = float(value.search(lines[4]))
-            mocoref_longitude = float(value.search(lines[5]))
-            mocoref_height = float(value.search(lines[6]))
+            mocoref_antenna = float(value.search(lines[3]).group())
+            mocoref_latitude = float(value.search(lines[4]).group())
+            mocoref_longitude = float(value.search(lines[5]).group())
+            mocoref_height = float(value.search(lines[6]).group())
 
     if generate or verbose:
         lines = []
@@ -901,13 +973,17 @@ def mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, line: int = 1, p
         lines.append(f"Antenna height [m] {{d}}: {mocoref_antenna}\n")
         lines.append(f"Latitude [deg]     {{d}}: {mocoref_latitude}\n")
         lines.append(f"Longitude [deg]    {{d}}: {mocoref_longitude}\n")
-        lines.append(f"Ground [m]         {{d}}: {mocoref_height}")
+        lines.append(f"Ground [m]         {{d}}: {mocoref_height}\n")
     if generate:
-        mocoref_path = data_file.parent / "mocoref.moco"
+        if data_file:
+            mocoref_path = data_file.parent / "mocoref.moco"
+        else:
+            mocoref_path = Path.cwd() / "mocoref.moco"
         with open(mocoref_path, 'w') as file:
             file.writelines(lines)
-        print(f"{mocoref_path} generated")
+    else:
+        mocoref_path = None
     if verbose or settings.VERBOSE:
         print(''.join(lines))
 
-    return mocoref_latitude, mocoref_longitude, mocoref_height, mocoref_antenna
+    return (mocoref_latitude, mocoref_longitude, mocoref_height + mocoref_antenna), mocoref_path

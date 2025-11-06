@@ -2,13 +2,363 @@ import click
 from pathlib import Path
 import os
 import time as Time
-import datetime
+from datetime import datetime, timedelta, date
+import re
+import shutil
 
-from ..gnss import fetch_swepos as run_fetch_swepos, station_ppp as run_station_ppp
+from ..gnss import fetch_swepos as run_fetch_swepos, station_ppp as run_station_ppp, rtkp, extract_rnx_info, reachz2rnx
 from ..trackfinding import trackfinder as run_trackfinder
-from .. import ImageInfo, TomoScenes
-from ..utils import interactive_console, mocoref as generate_mocoref
+from .. import ImageInfo, TomoScenes, Settings
+from ..utils import interactive_console, extract_datetime, local, warn, drop_into_terminal, generate_mocoref
 from ..forging import tomoforge
+from ..binaries import chc2rnx, reach2rnx, ubx2rnx
+from ..transformers import ecef_to_geo
+
+@click.command()
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path), default=Path.cwd())
+@click.option("-f", "--force", is_flag=True, help="Force generation of processing directory (this may overwrite existing directories, bit has no effect if PATH is a processing directory)")
+@click.option("--swepos", is_flag=True, help="Substitute for GNSS base station with files from nearest Swepos station")
+@click.option("--ppp", is_flag=True, help="Subsitute for mocoref data by running static PPP on GNSS base station")
+@click.option("--mocoref", "is_mocoref", is_flag=True, help="Force mocoref data to be read from mocoref.moco file")
+@click.option("--csv", "is_csv", is_flag=True, help="Force mocoref data to be read from CSV file")
+@click.option("--json", "is_json", is_flag=True, help="Force mocoref data to be read from JSON file")
+@click.option("--llh", "is_llh", is_flag=True, help="Force mocoref data to be read from LLH file")
+@click.option("-h", "--header", is_flag=True, help="Read mocoref data from RINEX header (no separate file, use ONLY if RINEX header is known to contain precise position)")
+@click.option("-p", "--processing", "is_processing_dir", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
+@click.option("-t", "--tag", default = "", flag_value=date.today().strftime('%Y%m%d'), help="Tag processing directory with specified string (default: the date of today)")
+@click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
+@click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
+@click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
+@click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
+@click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
+@click.option("-m", "--mask", "elevation_mask", type=float, default=None, help="Elevation mask for satellites")
+@click.option("-l", "--line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
+@click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
+def init(
+    path: Path,
+    force: bool,
+    swepos: bool,
+    ppp: bool,
+    is_mocoref: bool,
+    is_csv: bool,
+    is_json: bool,
+    is_llh: bool,
+    header: bool,
+    is_processing_dir: bool,
+    tag: str,
+    config: Path | None,
+    atx: Path | None,
+    receiver: Path | None,
+    downloads: int,
+    attempts: int,
+    elevation_mask: float|None,
+    line: int,
+    offset: float,
+) -> None:
+    """Searches recursively from the PATH (default: CWD) to find matching files:
+    (1) Drone GNSS .bin and .log;
+    (2) Drone IMU .bin and .log;
+    (3) Drone Radar .bin, .log and .cfg;
+    (4) GNSS base station; and
+    (5) Mocoref data or precise position of GNSS base station.
+    
+    If the GNSS base station file is missing, can fetch files from the nearest Swepos station,
+    and can supplement Mocoref data by performing static PPP on the base station.
+    Note that the path must point to a directory which contains exactly one set of drone data.
+    For other files, tomosar init will use the first matching file it finds.
+
+    For mocoref data a mocoref.moco file is prioritized followed by a .json file, with the underlying assumption
+    that these have been generated from raw mocoref data; then a .llh log is prioritized over a .csv file. 
+    
+    The files are converted where applicable and copied/moved into a processing directory, in such a way that the content
+    of the data directory where tomosar init was initiated is left unaltered. Then preprocessing is initiated [NOT IMPLEMENTED]
+    
+    Note that tomosar init can also be run inside a processing directory, in which case it simply initiates preprocessing [NOT IMPLEMENTED].
+    Any directory inside the settings specified PROCESSING_DIRS is assumed to be a processing directory, and any directory
+    outside is by default assumed to be a data directory (this behaviour can be overridden by the --processing option)."""
+    
+    def matching_dt(dt1: datetime, dt2: datetime):
+        if dt1 == dt2:
+            return True
+        if dt1 > dt2:
+            return dt1 - dt2 == timedelta(seconds=1)
+        if dt1 < dt2:
+            return dt2 - dt1 == timedelta(seconds=1)
+        
+    if swepos and ppp:
+        warn("Both --swepos and --ppp cannot be used, ignoring -ppp.")
+        ppp = False
+        
+    # Patterns to look for drone files
+    drone_patterns: dict[str, re.Pattern] = {
+        "Drone GNSS file": re.compile(r"^gnss_logger_dat-(?P<datetime>\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.bin$"),
+        "Drone GNSS log": re.compile(r"^gnss_logger_log-(?P<datetime>\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.log$"),
+        "Drone IMU file": re.compile(r"^imu_logger_dat-(?P<datetime>\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.bin$"),
+        "Drone IMU log": re.compile(r"^imu_logger_log-(?P<datetime>\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.log$"),
+        "Drone radar file": re.compile(r"^radar_logger_dat-(?P<datetime>\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.bin$"),
+        "Drone radar log": re.compile(r"^radar_logger_log-(?P<datetime>\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.log$"),
+        "Drone radar command": re.compile(r"^radar_logger_cmd-(?P<datetime>\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.cfg$"),
+    }
+
+    # Patterns to look for GNSS base station files
+    gnss_patterns: dict[str, re.Pattern] = {
+        "RINEX OBS": re.compile(r"^.+\.(\d{2}[Oo]|obs|OBS)$"),
+        "HCN": re.compile(r"^.+\.(HCN|hcn)$"),
+        "RTCM3": re.compile(r"^.+\.(RTCM3|rtcm3)$"),
+        "Reach .zip archive": re.compile(r"^Reach_\d+\.(zip|ZIP)$"),
+    }
+
+    navglo_pattern = re.compile(r"^.+\.(\d{2}[PpGg]|nav|NAV)")
+    
+    # Patterns to look for Mocoref data files
+    mocoref_patterns: dict[str, re.Pattern] = {
+        "mocoref": re.compile(r"^mocoref.moco$"),
+        "JSON": re.compile(r"^.+\.(json|JSON)$"),
+        "LLH": re.compile(r"^.+\.(llh|LLH)"),
+        "CSV": re.compile(r"^.+\.(csv|CSV)$"),
+    }
+    
+    # Dicts to store matches
+    drone_files = {key: [] for key in drone_patterns}
+    gnss_files = {key: [] for key in gnss_patterns}
+    mocoref_files = {key: [] for key in mocoref_patterns}
+    navglo = []
+
+    # Search recursively
+    for p in path.rglob("*"):
+        if p.is_file():
+            for key, regex in drone_patterns.items():
+                match = regex.match(p.name)
+                if match:
+                    dt = extract_datetime(p.name)
+                    drone_files[key].append((p, dt))
+            if not swepos:
+                for key, regex in gnss_patterns.items():
+                    match = regex.match(p.name)
+                    if match:
+                        gnss_files[key].append(p)
+                if ppp:
+                    match = navglo_pattern.match(p.name)
+                    if match:
+                        navglo.append(p)
+                if not header and not ppp:
+                    for key, regex in mocoref_patterns.items():
+                        match = regex.match(p.name)
+                        if match:
+                            mocoref_files[key].append(p)
+
+    # Ensure that exactly one file is found for each drone type with matching datetimes and extract nominal datetime
+    dt = None
+    for key, matches in drone_files.items():
+        # Ensure that exactly one file is found
+        if not matches:
+            raise FileNotFoundError(f"{key} not found.")
+        files, dts = zip(*matches)
+        if len(files) > 1:
+            raise RuntimeError(f"Multiple {key}s found: {local(files, path)}")
+        
+        # Ensure datetimes match and extract nominal datetime
+        if dt == None:
+            dt = dts[0]
+        else:
+            if not matching_dt(dt, dts[0]):
+                raise RuntimeError(f"Timestamps do not match: {dt} and {dts[0]}")
+            
+        # Store file
+        drone_files[key] = files[0]
+
+    # Print files
+    print("Found the following drone files:")
+    for key, file in drone_files.items():
+        print(f"{" " * 2}- {key}: {local(file, path)}")
+
+    if swepos:
+        header = True
+        base_obs = run_fetch_swepos(drone_files["Drone GNSS file"])
+        # Move, don't copy
+        base_obs = (base_obs, True)
+    else:
+        if ppp:
+            mocoref_data = True
+            header = False
+        # Check if Mocoref data was found
+        elif header:
+            mocoref_data = True
+            warn("Reading mocoref data from RINEX header. Use only if RINEX header is known to contain precise position.")
+        else:
+            if is_mocoref:
+                if is_csv or is_json or is_llh:
+                    raise ValueError("Ony one of --mocoref, --csv, --json and --llh can be used")
+                mocoref_key = "mocoref"
+            elif is_csv:
+                if is_json or is_llh:
+                    raise ValueError("Ony one of --mocoref, --csv, --json and --llh can be used")
+                mocoref_key = "CSV"
+            elif is_json:
+                if is_llh:
+                    raise ValueError("Ony one of --mocoref, --csv, --json and --llh can be used")
+                mocoref_key = "JSON"
+            elif is_llh:
+                mocoref_key = "LLH"
+            else:
+                mocoref_key = None
+            mocoref_data = False
+            for key, files in mocoref_files.items():
+                if files and (mocoref_key is None or mocoref_key == key):
+                    base_pos, mocoref_file = generate_mocoref(files[0], type=key, generate=True, line=line, pco_offset=offset)
+                    mocoref_data = True
+                    print(f"Mocoref data extracted from {key} file: {local(files[0], path)}")
+                    if mocoref_file:
+                        # Generated from other file: move, don't copy
+                        mocoref_file = (mocoref_file, True)
+                    else:
+                        # Occurs only if key is 'mocoref': copy, don't move
+                        mocoref_file = (files[0], False)
+
+        # Extract matching GNSS base station
+        base_obs = ()
+        if mocoref_data:
+            for key, files in gnss_files.items():
+                if files:
+                    match key:
+                        case "RINEX OBS":
+                            # Copy, don't move
+                            base_obs = (files[0], False)
+                        case "HCN":
+                            base_obs, _, _ = chc2rnx(files[0])
+                            # Move, don't copy
+                            base_obs = (base_obs, True)
+                        case "RTCM3":
+                            base_obs, _, _ = reach2rnx(files[0])
+                            # Move don't copy
+                            base_obs = (base_obs, True)
+                        case "Reach .zip archive":
+                            pass
+                    break
+        else:
+            # Only Reach .zip archive provides mocoref data
+            if gnss_files["Reach .zip archive"]:
+                pass
+            else:
+                raise FileNotFoundError(f"Could not find mocoref data.")
+
+        if base_obs:
+            print(f"GNSS base: {base_obs[0]}")
+        else:
+            raise FileNotFoundError(f"Could not find GNSS base.")
+        
+        settings = Settings()
+        if ppp:
+            if navglo:
+                navglo = navglo[0]
+            else:
+                navglo = None
+            base_pos, _, _ = run_station_ppp(
+                obs_path=base_obs[0],
+                navglo_path=navglo,
+                atx_path=atx,
+                antrec_path=receiver,
+                max_downloads=downloads,
+                max_retries=attempts,
+                elevation_mask=elevation_mask,
+                out_path=None,
+                header=False,
+            )
+            lon, lat, h = ecef_to_geo.transform(*base_pos)
+            mocoref_dict = {
+                settings.MOCOREF_LATITUDE: lat,
+                settings.MOCOREF_LONGITUDE: lon,
+                settings.MOCOREF_HEIGHT: h,
+                settings.MOCOREF_ANTENNA: 0.,
+            }
+            _, mocoref_file = generate_mocoref(mocoref_dict, generate=True)
+            # Move, don't copy
+            mocoref_file = (mocoref_file, True)
+
+    base_start, base_end, header_pos, _ = extract_rnx_info(base_obs[0])
+    if header:
+        lon, lat, h = ecef_to_geo.transform(*header_pos) 
+        mocoref_dict = {
+            settings.MOCOREF_LATITUDE: lat,
+            settings.MOCOREF_LONGITUDE: lon,
+            settings.MOCOREF_HEIGHT: h,
+            settings.MOCOREF_ANTENNA: 0.
+        }
+        base_pos, mocoref_file = generate_mocoref(mocoref_dict, generate=True)
+        # Move, don't copy
+        mocoref_file = (mocoref_file, True)
+    
+    # Check if processing directory
+    if not is_processing_dir:
+        if path.is_relative_to(settings.PROCESSING_DIRS):
+            is_processing_dir = True
+    
+    if is_processing_dir:
+        processing_dir = path
+        base_obs = base_obs[0]
+        mocoref_file = mocoref_file[0]
+    else:
+        processing_dir = settings.PROCESSING_DIRS / (path.name + "_" + tag)
+        processing_dir.mkdir(exist_ok=force)
+        
+        rawdata_dir = processing_dir / "rawdata" / dt.strftime('%Y%m%d')
+        rawdata_dir.mkdir(exist_ok=force, parents=True)
+        radar_dir = rawdata_dir  / "radar1"
+        radar_dir.mkdir(exist_ok=force)
+        ground_dir = rawdata_dir / "ground1"
+        ground_dir.mkdir(exist_ok=force)
+        mocoref_dir = rawdata_dir / "mocoref"
+        mocoref_dir.mkdir(exist_ok=force)
+        for key, file in drone_files.items():
+            drone_files[key] = shutil.copy2(file, radar_dir)
+        if base_obs[1]:
+            base_obs = shutil.move(base_obs[0], ground_dir)
+        else:
+            base_obs = shutil.copy2(base_obs[0], ground_dir)
+        if mocoref_file[1]:
+            mocoref_file = shutil.move(mocoref_file[0], mocoref_dir)
+        else:
+            mocoref_file = shutil.copy2(mocoref_file[0], mocoref_dir)
+        
+        # Move into processing dir
+        os.chdir(processing_dir)
+
+    print("All files located, dropping you into the processing directory ... ")
+    drop_into_terminal(processing_dir)
+    
+    # Initiate preprocessing
+    rover_obs, rover_nav, rover_sbs = ubx2rnx(drone_files["Drone GNSS file"])
+    if swepos:
+        elevation_mask = 5
+    rtkp(
+        rover_obs=rover_obs,
+        base_obs=base_obs,
+        nav_file=rover_nav,
+        sbs_file=rover_sbs,
+        out_path=rover_obs.with_suffix(".pos"),
+        config_file=config,
+        elevation_mask=elevation_mask,
+        mocoref_file=mocoref_file,
+    )
+
+    # Continue with IMU and unimoco ... 
+
+@click.command()
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("-o", "--output", "output_dir", type=click.Path(exists=False, file_okay=False, path_type=Path), default=None, help="Extract files into given folder (default: parent of archive)")
+@click.option("--rover", "rover_obs", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Target rover OBS for RTKP processing")
+@click.option("-n", "--nav", "extract_nav", is_flag=True, help="Extract NAV file")
+@click.option("--verbose", is_flag=True, help="Verbose mode.")
+def extract_reach(archive: Path, output_dir: Path, rover_obs: Path, extract_nav: bool, verbose: bool) -> None:
+    """Extracts a Reach .zip archive to produce:
+    (1) A RINEX OBS file for a single site,
+    (2) A mocoref.moco for the OBS file, and
+    (3) A RINEX NAV file (optional).
+    
+    Optionally takes a RINEX OBS file as input to extract from the archive the OBS file which has the greatest overlap with the
+    input RINEX file. Otherwise extracts the longest segment."""
+
+    reachz2rnx(archive=archive, output_dir=output_dir, rnx_file=rover_obs, nav=extract_nav, verbose=verbose)
 
 @click.command()
 @click.argument("path", type=click.Path(exists=True, path_type=Path))
@@ -17,8 +367,8 @@ from ..forging import tomoforge
 @click.option("--json", is_flag=True, help="File is a JSON file (default for .json and .JSON files)")
 @click.option("--llh", is_flag=True, help="File is an LLH log (default for .llh and .LLH files)")
 @click.option("-l", "--line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
-@click.option("--offset", type=float, default=-0.2, help="Specify vertical PCO between data log receiver and drone processing receiver (default=-0.2)")
-def mocoref(path, dry, csv, json, llh, line) -> None:
+@click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
+def mocoref(path, dry, csv, json, llh, line, offset) -> None:
     """Generate a mocoref file from a data file"""
     if csv:
         if json or llh:
@@ -32,7 +382,8 @@ def mocoref(path, dry, csv, json, llh, line) -> None:
         type = "LLH"
     else:
         type = None
-    generate_mocoref(data=path, type=type, line=line, generate=not dry, verbose=dry)
+    _, mocoref_file = generate_mocoref(data=path, type=type, line=line, generate=not dry, verbose=dry, pco_offset=offset)
+    print(f"Mocoref file {local(mocoref_file)} generated from {local(path)}")
 
 @click.command()
 @click.argument("path", type=click.Path(exists=True, path_type=Path))
@@ -64,12 +415,29 @@ def fetch_swepos(path, stations, downloads, attempts, output, dry, cont, nav) ->
 @click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
 @click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
 @click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
-@click.option("-o", "--output", type=click.Path(path_type=Path), default=None, help="Output directory for SWEPOS rinex files")
+@click.option("-o", "--output", type=click.Path(path_type=Path), default=False, flag_value=True, help="Generate .out file at specified path (default: next to OBS file)")
 @click.option("-d", "--dry", is_flag=True, help="Dry run without downloads")
-@click.option("--cont", is_flag=True, help="Continue run after downloads complete")
-@click.option("-x", "--no-header", 'header', is_flag=True, default=True, flag_value=False, help="Do not fodify OBS file header with new position.")
-def station_ppp(obs_file, navglo, atx, receiver, downloads, attempts, output, dry, cont, header) -> None:
+@click.option("-x", "--no-header", 'header', is_flag=True, default=True, flag_value=False, help="Do not modify OBS file header with new position.")
+@click.option("--retain", is_flag=True, help="Retain ephemeris data files after finishing")
+@click.option("-m", "--mocoref", "make_mocoref", is_flag=True, help="Generate mocoref.moco file with position")
+def station_ppp(
+    obs_file: Path,
+    navglo: Path|None,
+    atx: Path|None,
+    receiver: Path|None,
+    downloads: int,
+    attempts: int,
+    output: Path|bool,
+    dry: bool,
+    header: bool,
+    retain: bool,
+    make_mocoref: bool
+) -> None:
     """Attempt to determine base station position using PPP post processing."""
+    if output == True:
+        output = obs_file.with_suffix(".out")
+    if output == False:
+        output = None
     run_station_ppp(
         obs_path=obs_file,
         navglo_path=navglo,
@@ -78,9 +446,10 @@ def station_ppp(obs_file, navglo, atx, receiver, downloads, attempts, output, dr
         max_downloads=downloads,
         max_retries=attempts,
         dry=dry,
-        output_dir=output,
-        cont=cont,
-        header=header
+        out_path=output,
+        header=header,
+        retain=retain,
+        mocoref=make_mocoref
     )
 
 @click.command()

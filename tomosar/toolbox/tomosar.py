@@ -3,13 +3,12 @@ from rich.console import Console
 from rich.markdown import Markdown
 import subprocess
 
-from .. import __version__, tomoinfo
-from ..utils import warn
+from .. import __version__
 from ..config import PROJECT_PATH
 from .setup_tools import dependencies, setup, warmup, update_version_file
 from .settings_tools import settings, default, verbose, add, set, clear, remove
 from .interact_tools import load, sliceinfo
-from .processing_tools import forge, trackfinder, station_ppp, fetch_swepos, mocoref
+from .processing_tools import forge, trackfinder, station_ppp, fetch_swepos, mocoref, extract_reach, init
 from .test_tools import test
 
 # Dev tools
@@ -74,10 +73,12 @@ tomosar.add_command(remove)
 
 ## Processing chain
 tomosar.add_command(mocoref)
-tomosar.add_command(trackfinder)
-tomosar.add_command(forge)
+tomosar.add_command(extract_reach)
 tomosar.add_command(station_ppp)
 tomosar.add_command(fetch_swepos)
+tomosar.add_command(init)
+tomosar.add_command(trackfinder)
+tomosar.add_command(forge)
 
 ## Python interactive console entry ponts
 tomosar.add_command(sliceinfo)

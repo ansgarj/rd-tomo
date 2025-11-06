@@ -3,28 +3,37 @@ from datetime import datetime, timedelta, date, timezone
 import pytz
 import pandas as pd
 import math
-from pyproj import Transformer
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ftplib import FTP
 import time
-import re
 import numpy as np
 import matplotlib.pyplot as plt
-import json
+import re
+import zipfile
+import shutil
 
-from .utils import prompt_ftp_login, gunzip, ecef2enu
-from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, ppp, resource, local
+from .utils import prompt_ftp_login, gunzip, ecef2enu, warn, generate_mocoref
+from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, reach2rnx, rnx2rtkp, ppp, resource, local, tmp
 from .config import Settings
+from .transformers import ecef_to_geo
 
-def extract_rnx_info(file_path: str|Path) -> tuple[datetime|None, datetime|None, tuple[float, float, float]]:
+def extract_rnx_info(file_path: str|Path) -> tuple[datetime|None,
+                                                   datetime|None,
+                                                   tuple[float, float, float],
+                                                   tuple[float,float,float]]:
     """
-    Extract start/end times and approximate position from RINEX header.
+    Extract start/end times and approximate position from RINEX header. Output:
+    - TIME OF FIRST OBS (datetime or None): if not present in header reads from RINEX epochs
+    - TIME OF LAST OBS (datetime or None): if not present in header reads from RINEX epochs
+    - APPROX POS XYZ (tuple of floats)
+    - ANTENNA: DELTA H/E/N (tuple of floats)
     """
     earliest_date = datetime(year=2020, month=1, day=1,tzinfo=timezone.utc)
     start_time = None
     end_time = None
     approx_position = None
+    antenna_delta = (0., 0., 0.)
     with open(file_path, 'r', errors='ignore') as f:
         for line in f:
             if 'TIME OF FIRST OBS' in line:
@@ -50,13 +59,14 @@ def extract_rnx_info(file_path: str|Path) -> tuple[datetime|None, datetime|None,
                     approx_position = (x, y, z)
                 except:
                     pass
-            if start_time and end_time and approx_position:
-                break
+            elif 'ANTENNA: DELTA H/E/N' in line:
+                parts = line.strip().split()
+                antenna_delta = (float(parts[1]), float(parts[2]), float(parts[0]))
     if start_time is None or start_time < earliest_date:
         start_time = get_first_rinex_timestamp(file_path)
     if end_time is None or end_time < earliest_date:
         end_time = get_last_rinex_timestamp(file_path)
-    return start_time, end_time, approx_position
+    return start_time, end_time, approx_position, antenna_delta
 
 def get_first_rinex_timestamp(file_path: str|Path) -> datetime | None:
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -71,7 +81,6 @@ def get_first_rinex_timestamp(file_path: str|Path) -> datetime | None:
             if line.startswith('>'):
                 parts = line.split()
                 year, month, day, hour, minute, second = map(float, parts[1:7])
-                from datetime import datetime
                 return datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=timezone.utc)
     return None
 
@@ -245,11 +254,15 @@ def merge_swepos_rinex(data_dir: str|Path) -> tuple[Path|None, Path|None]:
     # Merge rinex files    
     if obs_files:
         merged_obs = merge_rnx(obs_files, force=True)
+        # Move outside of tmp dir
+        merged_obs = shutil.move(merged_obs, merged_obs.parent.parent)
     else:
         merged_obs = None
 
     if nav_files:
         merged_nav = merge_rnx(nav_files, force=True)
+        # Move outside of tmp dir
+        merged_nav = shutil.move(merged_nav, merged_nav.parent.parent)
     else:
         merged_nav = None
 
@@ -259,7 +272,6 @@ def merge_ephemeris(data_dir: str|Path) -> tuple[Path|None, Path|None]:
     data_path = Path(data_dir)
     eph_files = sorted(data_path.glob("*.SP3"))
     eph_files.extend(sorted(data_path.glob("*.CLK")))
-
 
     if eph_files:
         merged_sp3, merged_clk = merge_eph(eph_files, force=True)
@@ -424,7 +436,7 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
     x, y, z = [], [], []
     err, ts = [], []
     x_err, y_err, z_err = [], [], []
-    def get_timestamp(year, doy, sod):
+    def get_timestamp(year, doy, sod) -> datetime:
         # Start from Jan 1 of the given year
         base_date = datetime(year, 1, 1)
         # Add (DoY - 1) days and seconds of day
@@ -432,17 +444,28 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
         return full_datetime
 
     diff_n, diff_e, diff_u = [], [], []
-    with open(file_path, 'r') as f:
-        for line in f:
-            if line.startswith("INFO MODELLING Receiver Antenna Reference Point (ARP)"):
-                def extract_three_floats(text: str) -> None | tuple[float, float, float]:
-                    match = re.search(r'([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)[ \t]+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)[ \t]+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', text)
-                    if match:
-                        return tuple(map(float, match.groups()))
-                    else:
-                        return None
-                arp = np.asarray(extract_three_floats(line))
-
+    if len(file_path) < 1000:
+        with open(file_path, 'r') as f:
+            for line in f:
+                if line.startswith("OUTPUT"):
+                    parts = line.split()
+                    try:
+                        x.append(float(parts[11]))
+                        y.append(float(parts[12]))
+                        z.append(float(parts[13]))
+                        x_err.append(float(parts[17]))
+                        y_err.append(float(parts[18]))
+                        z_err.append(float(parts[19]))
+                        diff_n.append(float(parts[23]))
+                        diff_e.append(float(parts[24]))
+                        diff_u.append(float(parts[25]))
+                        err.append(float(parts[10]))
+                        ts.append(get_timestamp(year=int(parts[1]), doy=int(parts[2]), sod=float(parts[3])))
+                    except (IndexError, ValueError):
+                        continue  # Skip malformed lines
+    else:
+        lines = file_path.splitlines()
+        for line in lines:
             if line.startswith("OUTPUT"):
                 parts = line.split()
                 try:
@@ -460,7 +483,7 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
                 except (IndexError, ValueError):
                     continue  # Skip malformed lines
     
-    # Output position values
+# Output position values
     x = np.array(x)
     y = np.array(y)
     z = np.array(z)
@@ -474,11 +497,16 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
     # Convergennce
     conv = (err < 0.002) & (x_err < 0.0013) & (y_err < 0.0013) & (z_err < 0.0013)
     idx = np.argmax(conv)
+    # Convergence time and total time
+    conv_time = ts[idx] - ts[0]
+    total_time = ts[-1] - ts[0]
+    if not conv.any():
+        raise RuntimeError(f"Station PPP failed to converge: {file_path if len(file_path) < 1000 else 'gLAB OUTPUT'} (total runtime: {total_time})")
 
     # Mean position after convergence
-    x_mean = x[conv].mean()
-    y_mean = y[conv].mean()
-    z_mean = z[conv].mean()
+    x_mean = np.nanmean(x[conv])
+    y_mean = np.nanmean(y[conv])
+    z_mean = np.nanmean(z[conv])
 
     # STD after convergence
     # x_std = x[conv].std()
@@ -490,22 +518,49 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
     y_res = y - y_mean
     z_res = z - z_mean
 
-    # Convergence time and total time
-    conv_time = ts[idx] - ts[0]
-    total_time = ts[-1] - ts[0]
-
     # Geodetic coordinates
-    lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4979", always_xy=True).transform(x_mean, y_mean, z_mean)
+    lon, lat, h = ecef_to_geo.transform(x_mean, y_mean, z_mean)
     if verbose or Settings().VERBOSE:
         print(f"PPP solution converged after {conv_time}, average taken over {total_time - conv_time}")
         print(f"Position: lat={lat}, lon={lon}, h={h:.3f}")
 
     rotation = ecef2enu(lat, lon)
     
-    mean = (x_mean, y_mean, z_mean) - rotation.T @ arp
-    diff = (diff_e, diff_n, diff_u) - arp
+    mean = (x_mean, y_mean, z_mean)
+    diff = (diff_e, diff_n, diff_u)
 
     return mean, rotation,  idx, diff, np.asarray((x_res, y_res, z_res))
+
+def rtkp(
+        rover_obs: str|Path,
+        base_obs: str|Path,
+        nav_file: str|Path,
+        out_path: str|Path,
+        config_file: str|Path = None,
+        sbs_file: str|Path = None,
+        elevation_mask: float|None = None,
+        mocoref_file: str|Path = None,
+        mocoref_type: str|None = None,
+        mocoref_line: int = 1
+) -> None:
+    """Calls rnx2rtkp and reads the .pos file"""
+    rnx2rtkp(
+        rover_obs=rover_obs,
+        base_obs=base_obs,
+        nav_file=nav_file,
+        out_path=out_path,
+        config_file=config_file,
+        sbs_file=sbs_file,
+        elevation_mask=elevation_mask,
+        mocoref_file=mocoref_file,
+        mocoref_type=mocoref_type,
+        mocoref_line=mocoref_line
+    )
+    if not out_path.is_file():
+        raise FileNotFoundError(f"Could not find generated .pos file: {out_path}")
+
+    coords, q, gpst = read_pos_file(out_path)
+    print(f"Quality conversion: Q1 = {q:.2f} %")
 
 def detect_convergence_and_mean(x_vals, y_vals, z_vals, x_err, y_err, z_err, err, window_size=100, threshold_percentile=10, verbose: bool = False):
     # Residuals from full-series mean
@@ -583,9 +638,9 @@ def update_rinex_position(file_path, new_coords) -> None:
     with open(file_path, 'r') as file:
         lines = file.readlines()
     if np.isnan(new_coords).any():
-        print("NaN coordinate detected. Header not updated.")
+        warn("NaN coordinate detected. Header not updated.")
         return
-    new_line = f"{new_coords[0]:14.4f}{new_coords[1]:14.4f}{new_coords[2]:14.4f}                  APPROX POSITION XYZ\n"
+    new_line = f"{new_coords[0]:14.4f}{new_coords[1]:14.4f}{new_coords[2]:14.4f}{" " * 18}APPROX POSITION XYZ\n"
 
     updated = False
     for i, line in enumerate(lines):
@@ -647,7 +702,7 @@ def etrs89_to_wgs84_ecef(X_etrs89, Y_etrs89, Z_etrs89, utc_datetime) -> np.ndarr
 
 # Orchestrating functions
 def fetch_swepos(
-        drone_ubx: str|Path,
+        drone_gnss: str|Path,
         stations_path: str|Path = None,
         max_downloads: int = 10,
         max_retries: int = 3,
@@ -655,26 +710,22 @@ def fetch_swepos(
         min_dur: int  = None,
         dry: bool = False,
         fetch_nav: bool = False,
-        cont: bool = False,
-    ):
-    drone_ubx = Path(drone_ubx)
+    ) -> tuple[Path, Path|None]:
+    drone_gnss = Path(drone_gnss)
     if output_dir is None:
-        output_dir = drone_ubx.parent
+        output_dir = drone_gnss.parent
     else:
         output_dir = Path(output_dir)
     
-    if drone_ubx.suffix == '.obs':
-        obs_path = drone_ubx
+    if drone_gnss.suffix == '.obs':
+        temp = False
+        obs_file = drone_gnss
     else:
-        sbs_path = drone_ubx.with_suffix(".sbs")
-        nav_path = drone_ubx.with_suffix(".nav")
-        obs_path = drone_ubx.with_suffix(".obs")
-        if not obs_path.exists() or not nav_path.exists() or not sbs_path.exists():
-            ubx2rnx(drone_ubx)
-    tmp_dir = output_dir / "TMP"
+        obs_file, _, _ = ubx2rnx(drone_gnss, nav=False, sbs=False)
+        temp = True
     
-    if not cont:
-        start_utc, end_utc, pos = extract_rnx_info(obs_path)
+    with tmp(obs_file, temporary=temp) as obs_path:
+        start_utc, end_utc, pos, _ = extract_rnx_info(obs_path)
         stockholm_tz = pytz.timezone('Europe/Stockholm')
 
         if start_utc and end_utc:
@@ -685,7 +736,7 @@ def fetch_swepos(
         else:
             print("No valid timestamps found in the file.")
 
-        lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4979", always_xy=True).transform(*pos)
+        lon, lat, h = ecef_to_geo.transform(*pos)
         if pos:
             print(f"Approximate location: (lat: {lat}, lon: {lon}, h: {h:.3f})")
         else:
@@ -705,45 +756,36 @@ def fetch_swepos(
             print(f"Name: {nearest_station['Stationsnamn']} ({station_code})")
             print(f"Distance: {nearest_station['Distance']/1000:.2f} km")
         else:
-            print("Failed to locate nearest station.")
-            return
+                print("Failed to locate nearest station.")
+                return
 
         print("Logging into Swepos network ...", flush=True)
-        failed = fetch_swepos_files(
-            station_code=station_code,
-            start_time=start_utc,
-            end_time=end_utc,
-            output_dir=tmp_dir,
-            max_workers=max_downloads,
-            max_retries=max_retries,
-            min_dur=min_dur,
-            dry_run=dry,
-            fetch_nav=fetch_nav
-        )
-        if failed:
-            raise FileNotFoundError("Download from Swepos failed.")
+        with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
+            failed = fetch_swepos_files(
+                station_code=station_code,
+                start_time=start_utc,
+                end_time=end_utc,
+                output_dir=tmp_dir,
+                max_workers=max_downloads,
+                max_retries=max_retries,
+                min_dur=min_dur,
+                dry_run=dry,
+                fetch_nav=fetch_nav
+            )
+            if failed:
+                    raise FileNotFoundError("Download from Swepos failed.")
 
-    if tmp_dir.exists():
-        merged_obs, merged_nav = merge_swepos_rinex(tmp_dir)
-
-        print("Cleaning up ...", end=" ", flush=True)
-        for file in tmp_dir.iterdir():
-            if file.is_file():
-                file.unlink()
-        tmp_dir.rmdir()
-        print("done.")
+            merged_obs, merged_nav = merge_swepos_rinex(tmp_dir)
 
         if not merged_obs.is_file():
-            raise RuntimeError("Merging of downloaded observation files failed")
+            raise FileNotFoundError(f"Generated OBS file: {merged_obs} not found")
         if not merged_nav is None and not merged_nav.is_file():
-            raise RuntimeError("Merging of downloaded navigation files failed")
+            raise FileNotFoundError(f"Generated NAV file: {merged_nav} not found")
         
-        start_utc, _, etrs89_pos = extract_rnx_info(merged_obs)
+        start_utc, _, etrs89_pos, _ = extract_rnx_info(merged_obs)
         wgs84_pos = etrs89_to_wgs84_ecef(*etrs89_pos, utc_datetime=start_utc)
         update_rinex_position(merged_obs, wgs84_pos)
         return merged_obs, merged_nav
-    
-    return None, None
     
 def station_ppp(
         obs_path: str|Path,
@@ -752,10 +794,12 @@ def station_ppp(
         antrec_path: str|Path = None,
         max_downloads: int = 10,
         max_retries: int = 3,
-        out_path: str|Path = None,
+        out_path: str|Path|None = None,
+        elevation_mask: float|None = None,
         header: bool = True,
         dry: bool = False,
-        cont: bool = False
+        retain: bool = False,
+        make_mocoref: bool = True
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Runs static PPP on a base observation file by first downloading matching precise ephemeris files from gssc.esa.int.
     Input parameters:
@@ -767,67 +811,184 @@ def station_ppp(
     - out_path: file where output is stored (default: next to observation file in a .out file)
     - header: modify the rinex header with the new position
     - dry: only show which files would be downloaded
-    - cont: attempts to continue where a previous attempt stopped"""
+    - retain: retains downloaded ephemeris data after finishing
+    - mocoref: generate mocoref.moco file with position"""
     if not obs_path.is_file():
         raise FileNotFoundError(f"Rinex observation file not found: {obs_path}")
 
-    if not out_path:
-        out_path = obs_path.with_suffix(".out").name
+    if out_path:
+        output_dir = out_path.parent
+        output_dir.mkdir(exist_ok=True)
+    else:
+        output_dir = obs_path.parent
 
-    output_dir = out_path.parent
-    output_dir.mkdir(exist_ok=True)
-
-    start_utc, end_utc, approx_pos = extract_rnx_info(obs_path)
-    tmp_dir = output_dir / "TMP"
-    if not cont:
+    start_utc, end_utc, approx_pos, antenna_delta = extract_rnx_info(obs_path)
+    with tmp(output_dir / "TMP", allow_dir=True) as tmp_dir:
         failed = fetch_sp3_clk(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, max_workers=max_downloads, max_retries=max_retries, dry=dry)
         if failed:
             raise FileNotFoundError("Download of precise ephemeris and clock data from ESA failed.")
-    
-    if tmp_dir.exists():
-        merge_ephemeris(tmp_dir)
+        
+        sp3_file, clk_file = merge_ephemeris(tmp_dir)
+        if retain:
+            sp3_file = shutil.move(sp3_file, sp3_file.parent.parent)
+            clk_file = shutil.move(clk_file, clk_file.parent.parent)
 
-        print("Cleaning up ...", end=" ", flush=True)
-        for file in tmp_dir.iterdir():
-            if file.is_file():
-                file.unlink()
-        tmp_dir.rmdir()
-        print("done.")
-
-    # Set up PPP command
-    if not out_path.exists() or not cont:
-        sp3_file = next(f for f in output_dir.glob("*.SP3"))
-        clk_file = next(f for f in output_dir.glob("*.CLK"))
+        # Run PPP command
+        out = ""
         print()
-        ppp(
-            obs_file=obs_path,
-            sp3_file=sp3_file,
-            clk_file=clk_file,
-            out_path=out_path,
-            navglo_file=navglo_path,
-            atx_file=atx_path,
-            antrec_file=antrec_path
-        )
-    
-    if not out_path.exists():
+        out = ppp(
+        obs_file=obs_path,
+        sp3_file=sp3_file,
+        clk_file=clk_file,
+        out_path=out_path,
+        navglo_file=navglo_path,
+        atx_file=atx_path,
+        antrec_file=antrec_path,
+        elevation_mask=elevation_mask
+    )
+   
+    if out_path and not out_path.is_file():
         raise FileNotFoundError(f"Cannot find generated out file: {out_path}")
-    
-    # Extract position
-    pos, rotation, _, _, _ = read_out_file(out_path, verbose=True)
 
+    # Extract position
+    pos, rotation, _, _, _ = read_out_file(out, verbose=True)
+    # Update position to be to the ARP
+    pos = pos - rotation.T @ antenna_delta
+
+    # Compare against header
     diff = rotation @ [pos[0] - approx_pos[0], pos[1] - approx_pos[1], pos[2] - approx_pos[2]]
     distance = math.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
-    print(f"Distance: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
+    print(f"Distance from header position: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
+    
     if header:
         update_rinex_position(obs_path, pos)
-    lon, lat, h = Transformer.from_crs("epsg:4978", "epsg:4979", always_xy=True).transform(*pos)
-    settings = Settings()
-    mocoref = {
-        settings.MOCOREF_LATITUDE: lat,
-        settings.MOCOREF_LONGITUDE: lon,
-        settings.MOCOREF_HEIGHT: h
-    }
-    with open(output_dir / "mocoref.json", 'w') as f:
-        json.dump(mocoref, f, indent=4)
+    if make_mocoref:
+        lon, lat, h = ecef_to_geo.transform(*pos)
+        settings = Settings()
+        mocoref = {
+            settings.MOCOREF_LATITUDE: lat,
+            settings.MOCOREF_LONGITUDE: lon,
+            settings.MOCOREF_HEIGHT: h,
+            settings.MOCOREF_ANTENNA: 0.
+        }
+        generate_mocoref(mocoref, generate=True)
+    
     return pos, rotation, distance
 
+def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_dir: str|Path|None = None, rnx_file: Path|str|None = None, nav: bool = False, verbose: bool = False) -> tuple[dict[Path, dict], tuple[Path|None, Path|None, Path|None]]:
+    """Extracts a Reach .zip archive to produce:
+    - A RINEX OBS file for a single site
+    - A mocoref.moco for the OBS file
+    - A RINEX NAV file (optional)
+    
+    Optionally takes a RINEX OBS file as input to extract from the archive the OBS file which has the greatest overlap with the
+    input RINEX file. Otherwise extracts the longest segment. The reference_date parameter is used to get the correct GPS week for
+    the RTCM3 file if this cannot be parsed from the archive name (if a RINEX OBS is provided as reference, the reference_date
+    is set from this OBS if parsing from the filename fails and it is not specified by user).
+    
+    Returns:
+    - Dict indexed by paths to files produced with nested dict keys:
+        - OBS PATH: APPROX POS XYZ, TIME OF FIRST OBS, TIME OF LAST OBS
+        - MOCOREF PATH: POSITION
+        - NAV PATH: None
+    - Tuple of paths: (OBS PATH, MOCOREF PATH, NAV PATH or None)"""
+
+    archive = Path(archive)
+
+    # Determine base name for extracted OBS and NAV files
+    base_name = archive.with_suffix("").name
+
+    # Determine reference timestamp from basename if not provided
+    if not reference_date:
+        if dt := re.search(r'\d{14}', base_name):
+            reference_date = datetime.strptime(dt.group(), '%Y%m%d%H%M%S')
+        elif rnx_file:
+            reference_date, _, _ = extract_rnx_info(rnx_file)
+        else:
+            raise ValueError(f"Could not determine a reference timestamp from the archive name ({archive.name}). Please provide it explicitly.")
+
+
+    # Determine output directory
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True, parents=True)
+    else:
+        output_dir = archive.parent
+
+    obs_file = output_dir / (base_name + ".obs")
+
+    with zipfile.ZipFile(archive, 'r') as zip_ref:
+        def extract_to(source: Path, destination: Path, final_destination: Path|None = None) -> None:
+            if not final_destination:
+                final_destination = destination
+            if verbose or Settings().VERBOSE:
+                print(f"Extracting {archive}/{source} to {final_destination}")
+            with zip_ref.open(source) as source_file:
+                with open(destination, 'wb') as target_file:
+                    target_file.write(source_file.read())
+        
+        all_files = zip_ref.namelist()
+        rtcm3_file = False
+        llh_file = False
+        nav_file = False
+        for file in all_files:
+            # Look for files
+            if re.search(r'\.(rtcm3|RTCM3)$', file):
+                rtcm3_file = file
+            if re.search(r'\.(llh|LLH)$', file):
+                llh_file = file
+            if re.search(r'\.\d{2}(P|p)$', file) and nav:
+                nav_file = file
+
+        # Extract RINEX OBS
+        if rtcm3_file:
+            with tmp(output_dir / "rtcm3.tmp") as rtcm3_tmp:
+                extract_to(rtcm3_file, rtcm3_tmp, final_destination=obs_file)
+                if rnx_file:
+                    start, end, _, _ = extract_rnx_info(rnx_file)
+                else:
+                    start, end = None, None
+                obs_data, _, _ = reach2rnx(rtcm_file=rtcm3_tmp, reference_date=reference_date, tstart=start, tend=end, obs_file=obs_file, verbose=verbose)
+            # Verify success
+            if not obs_file.is_file():
+                raise FileNotFoundError(f"No RINEX OBS could be extracted from archive RTCM3 file: {rtcm3_file}")
+        else:
+            raise FileNotFoundError(f"No RTCM3 file found in archive: {archive}")
+        
+        # Extract mocoref.moco
+        if llh_file:
+            # Update stard and end timestamps to match the OBS file
+            start = obs_data[obs_file]["TIME OF FIRST OBS"]
+            end = obs_data[obs_file]["TIME OF LAST OBS"]
+
+            # Extract mocoref.moco file
+            with tmp(output_dir / "llh.tmp") as llh_tmp:
+                extract_to(llh_file, llh_tmp, final_destination=llh_tmp.with_name("mocoref.moco"))
+                mocoref_data, mocoref_file = generate_mocoref(llh_tmp, type="LLH", generate=True, tstart=start, tend=end)
+            
+            # Verify success and add to obs_data
+            if mocoref_file.is_file():
+                obs_data[mocoref_file] = {
+                    "POSITION": mocoref_data
+                }
+            else:
+                warn(f"No mocoref.moco file could be extracted from archive LLH log: {llh_file}")
+        else:
+            warn(f"No LLH log found in archive: {archive}")
+
+        # Verify nav data
+        if nav:
+            if nav_file:
+                extract_to(nav_file, obs_file.with_suffix(".nav"))
+                nav_file = obs_file.with_suffix(".nav")
+                
+                # Add to obs_data
+                obs_data[nav_file] = {}
+            else:
+                warn(f"No NAV data found in archive: {archive}")
+                nav_file = None
+        else:
+            nav_file = None
+        
+    return obs_data, (obs_file, mocoref_file, nav_file)
+        

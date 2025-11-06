@@ -15,16 +15,10 @@ from rasterio.io import DatasetReader
 from xml.etree import ElementTree as ET
 import numpy as np
 from pyproj import Transformer
+from datetime import datetime, timezone, timedelta
 
-from .utils import changed, warn, mocoref as read_mocoref
+from .utils import changed, warn, local, generate_mocoref
 from .config import Settings, LOCAL
-
-# Makes Paths relative to CWD if in the CWD tree
-def local(path: Path) -> Path:
-    try:
-        return str(path.relative_to(Path.cwd()))
-    except:
-        return str(path)
 
 # Catch-all run command for binariy executables
 def run(cmd: str | list, capture: bool = True):
@@ -33,7 +27,7 @@ def run(cmd: str | list, capture: bool = True):
         cmd = [cmd]
     binary_name = cmd[0]
     require_binary(binary_name)
-    cmd = [local(part) if isinstance(part, Path) else part for part in cmd]
+    cmd = [local(part) if isinstance(part, Path) else str(part) for part in cmd]
     if Settings().VERBOSE:
             print(' '.join(cmd))
     try:
@@ -105,7 +99,7 @@ def _resolve_resources(keys, resource_func, **kwargs) -> Iterator[dict]:
             try:
                 ctx = resource_func(None, key, **kwargs)
                 path = stack.enter_context(ctx)
-                resolved[key] = str(path) if path.is_file() else ""
+                resolved[key] = str(path) if path and path.is_file() else ""
             except Exception as e:
                 warn(f"Could not resolve resource for key '{key}': {e}")
                 resolved[key] = ""
@@ -146,7 +140,8 @@ def resource(path: str | Path | None, key: str = None, **kwargs) -> Iterator[Pat
             else:
                 raise RuntimeError(f"Path {path} does not point to a file.")
     
-    key = key.upper()
+    if key:
+        key = key.upper()
     # Match against file keys for Settings reference or internal pointers    
     match key:
         case "SATELLITES":
@@ -232,15 +227,47 @@ def resource(path: str | Path | None, key: str = None, **kwargs) -> Iterator[Pat
             try:
                 yield tmp_path
             finally:
-                tmp_path.unlink(missing_ok=True)  # Clean up after use
+                if isinstance(tmp_path, Path): # Not None
+                    tmp_path.unlink(missing_ok=True)  # Clean up after use
     else:
         # Yield temporary local path
         try:
             yield tmp_path
         finally:
-            if isinstance(tmp_path, Path):
+            if isinstance(tmp_path, Path): # Not None
                 tmp_path.unlink(missing_ok=True)  # Clean up after use
 
+@contextmanager
+def tmp(*args, temporary: bool = True, allow_dir: bool = False) -> Iterator[Path]:
+    """Makes a path or several paths temporary within the context. If allow_dir is False, the path must point
+    to a file or not exist; if the path does not exist, it will still be unlinked after the context ends (allowing
+    file generation within the context). If allow_dir is True and path does not exist when tmp is called,
+    a temporary directory matching the path will be generated. If the path points to a directory, ALL content
+    is also made temporary.
+    
+    If a falsy value is passed tmp will yield None."""
+    def unlink(paths: tuple[Path, ...]) -> None:
+        """Helper function to unlink a tuple of paths"""
+        for path in paths:
+            if path.is_file():
+                path.unlink()
+            if path.is_dir():
+                shutil.rmtree(path)
+
+    if not args:
+        yield None
+    paths = tuple(Path(path) for path in args)
+    for path in paths:
+        if not allow_dir and path.is_dir():
+            raise ValueError("To allow directories to be made temporary, specify allow_dir=True.")
+        if allow_dir and not path.exists():
+            path.mkdir(parents=True, exist_ok=True)
+    try:
+        yield paths[0] if len(paths) == 1 else paths
+    finally:
+        if temporary:
+            unlink(paths)
+              
 # Get elevation from DEMs for a point
 def elevation(lat: float, lon: float, dem_path: Path|str = None) -> float | None:
     """Returns the elevation for a specific point from the highest resolved DEM at that point,
@@ -379,7 +406,7 @@ def _generate_merged_filenames(files: list[Path]) -> Path | None:
         if frequency:
             merged_filename += f"_{freq}"
         merged_filename += f"_{out_type}.{out_ext}"
-        merged_filename = files[0].parent.parent / merged_filename
+        merged_filename = files[0].parent / merged_filename
         descriptive_filenames.append(merged_filename)
 
     if len(descriptive_filenames) > 1:
@@ -430,29 +457,281 @@ def merge_eph(eph_files: list[str|Path], force: bool = False) -> tuple[Path|None
 
     return merged_sp3, merged_clk
 
-def ubx2rnx(ubx_file: str|Path) -> None:
-    sbs_path = ubx_file.with_suffix(".sbs")
-    nav_path = ubx_file.with_suffix(".nav")
+def ubx2rnx(ubx_file: str|Path, nav: bool = True, sbs: bool = True) -> tuple[Path, Path|None, Path|None]:
+    """Convert a UBX file (drone gnss_logger_dat-[...].bin file) to RINEX."""
     obs_path = ubx_file.with_suffix(".obs")
-    result = run(["convbin", "-r", "ubx", "-od", "-os", "-o", str(obs_path), "-n", str(nav_path), "-s", str(sbs_path), str(ubx_file)])
+    cmd = ["convbin", "-r", "ubx", "-od", "-os", "-o", obs_path]
+    if nav:
+        nav_path = ubx_file.with_suffix(".nav")
+        cmd.extend(["-n", nav_path])
+    else:
+        nav_path = None
+    if sbs:
+        sbs_path = ubx_file.with_suffix(".sbs")
+        cmd.extend(["-s", sbs_path])
+    else:
+        sbs_path = None
+    cmd.append(ubx_file)
+    result = run(cmd)
     print(result.stdout)
+
     return obs_path, nav_path, sbs_path
 
-def reach2rnx(ubx_file: str|Path) -> tuple[Path, Path, Path]:
-    sbs_path = ubx_file.with_suffix(".sbs")
-    nav_path = ubx_file.with_suffix(".nav")
-    obs_path = ubx_file.with_suffix(".obs")
-    result = run(["convbin", "-r", "rtcm3", "-od", "-os", "-o", str(obs_path), "-n", str(nav_path), "-s", str(sbs_path), str(ubx_file)])
+def _split_by_site_occupation(
+        rnx_file: Path|str,
+        output_path: Path|str|None = None,
+        single: bool = True,
+        tstart: datetime = None,
+        tend: datetime = None,
+        verbose: bool = False
+    ) -> dict[Path, dict]:
+    """Splits a RINEX file by blocks with 'EVENT: NEW SITE OCCUPATION' lines, using the main header
+    but the APPROX POSITION XYZ line updated from the new block along with FIRST OBS TIME and LAST OBS TIME.
+    Returns a dict indexed by output path with the following nested keys:
+    - "APPROX POSITION XYZ": a 3-tuple of floats with the header ECEF coordinates,
+    - "TIME OF FIRST OBS": a datetime object representing the first obs, and
+    - "TIME OF LAST OBS": a datetime object representing the last obs."""
+
+    def get_metadata() -> tuple[tuple[float,float,float], datetime, datetime]:
+        """Helper function to get metadata from current_position, first_observation, first_constellation, 
+        current_observation and current_constellation"""
+        # Position in ECEF coordinates
+        parts = current_position.split()
+        try:
+            x, y, z = map(float, parts[0:3])
+            position = (x, y, z)
+        except:
+            raise RuntimeError(f"Failed to parse APPROX POSITION XYZ line: {current_position}")
+        
+        # First observation epoch
+        parts = first_observation.split()
+        try:
+            year, month, day, hour, minute, second = map(float, parts[1:7])
+            first_obs = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=timezone.utc)
+        except:
+            raise RuntimeError(f"Failed to parse first observation line: {first_observation}")
+        if len(first_constellation) > 1:
+            first_obs = (first_obs, "MIX")
+        elif len(first_constellation) == 1:
+            first_obs = (first_obs, first_constellation.pop())
+        else:
+            raise RuntimeError(f"No constellation found for first observation: {first_observation}")
+        
+        # Last observation epoch
+        parts = current_observation.split()
+        try:
+            year, month, day, hour, minute, second = map(float, parts[1:7])
+            last_obs = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=timezone.utc)
+        except:
+            raise RuntimeError(f"Failed to parse last observation line: {current_observation}")
+        if len(current_constellation) > 1:
+            last_obs = (last_obs, "MIX")
+        elif len(current_constellation) == 1:
+            last_obs = (last_obs, current_constellation.pop())
+        else:
+            raise RuntimeError(f"No constellation found for last observation: {current_observation}")
+
+        return position, first_obs, last_obs
+                
+    with open(rnx_file, 'r') as f:
+        lines = f.readlines()
+
+    # Extract header
+    header = []
+    i = 0
+    while not lines[i].strip().endswith("END OF HEADER"):
+        if "APPROX POSITION XYZ" in lines[i]:
+            header_position = lines[i]
+        header.append(lines[i])
+        i += 1
+    header.append(lines[i])  # Add END OF HEADER
+    i += 1
+    
+    # Set verbose
+    verbose = verbose or Settings.VERBOSE
+    if verbose:
+        print(f"Working on file: {rnx_file} to find SITES ...", flush=True)
+
+    # Prepare for splitting
+    blocks = []
+    current_block = []
+    current_position = header_position
+    current_observation = None
+    first_observation = None
+
+    constellation_map = {
+        'G': 'GPS',
+        'R': 'GLONASS',
+        'E': 'GALILEO',
+        'C': 'BEIDOU',
+        'J': 'QZSS',
+        'I': 'IRNSS',
+        'S': 'SBAS'
+    }
+
+    valid_prefixes = ('>', 'G', 'R', 'E', 'C', 'J', 'I', 'S')
+    clean_lines = [line for line in lines if line.strip() and line.strip()[0] in valid_prefixes or "EVENT:" in line or "COMMENT" in line]
+    
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or (line.strip()[0] not in valid_prefixes and "EVENT:" not in line and "COMMENT" not in line):
+            # Skip malformed lines
+            i += 1
+            continue
+        if "EVENT: NEW SITE OCCUPATION" in line:
+            # Save current block if it exists
+            if current_block:
+                blocks.append((current_block, *get_metadata()))
+                current_block = []
+
+            # Clear observations
+            first_observation = None
+            first_constellation = set()
+            current_observation = None
+            current_constellation = set()
+
+            # Look ahead for APPROX POSITION XYZ
+            j = i
+            while j < len(lines):
+                # Position of new block
+                if "APPROX POSITION XYZ" in lines[j]:
+                    current_position = lines[j]
+                # Observation data starts in new block
+                if lines[j].startswith(">"):
+                    i = j
+                    break
+                j += 1
+        else:
+            if line.startswith(">"):
+                if current_observation and not first_observation:
+                    first_observation = current_observation
+                    first_constellation = current_constellation
+                current_observation = line
+                current_constellation = set()
+            if line.strip()[0] in constellation_map:
+                current_constellation.add(constellation_map[line.strip()[0]])
+            current_block.append(line)
+            i += 1
+
+    # Add last block
+    if current_block:
+        blocks.append((current_block, *get_metadata()))
+
+    # Write out each block
+    output = {}
+    max_dur = (timedelta(), None)
+    if output_path:
+        output_path = Path(output_path)
+    else:
+        output_path = rnx_file.with_suffix(".obs")
+    for idx, (block_lines, position, first_obs, last_obs) in enumerate(blocks):
+        # Update header with new position and first and last obs times
+        position_line = f"{position[0]:14.4f}{position[1]:14.4f}{position[2]:14.4f}{" " * 18}APPROX POSITION XYZ\n"
+        first_obs_line = f"{f'{first_obs[0].year:04}':>6}{f'{first_obs[0].month:02}':>6}{f'{first_obs[0].day:02}':>6}{f'{first_obs[0].hour:02}':>6}{f'{first_obs[0].minute:02}':>6}{f'{first_obs[0].second + first_obs[0].microsecond * 1E-6:02.7f}':>13}{first_obs[1]:>8}{" "*9}TIME OF FIRST OBS\n"
+        last_obs_line = f"{f'{last_obs[0].year:04}':>6}{f'{last_obs[0].month:02}':>6}{f'{last_obs[0].day:02}':>6}{f'{last_obs[0].hour:02}':>6}{f'{last_obs[0].minute:02}':>6}{f'{last_obs[0].second + last_obs[0].microsecond * 1E-6:02.7f}':>13}{last_obs[1]:>8}{" "*9}TIME OF LAST OBS\n"
+        for i, line in enumerate(header):
+            if "APPROX POSITION XYZ" in line:
+                header[i] = position_line
+                header_position = position_line
+            if "TIME OF FIRST OBS" in line:
+                header[i] = first_obs_line
+            if "TIME OF LAST OBS" in line:
+                header[i] = last_obs_line
+        lines = header + block_lines
+        if verbose:
+            print(f"SITE PARSED:\n{position_line}{first_obs_line}{last_obs_line}", end="")
+        if single:
+            t2 = min(last_obs[0], tend) if tend else last_obs[0]
+            t1 = max(first_obs[0], tstart) if tstart else first_obs[0]
+            if t2 - t1 > max_dur[0]:
+                max_dur = (t2 - t1, idx)
+                output[output_path] = {
+                    "RINEX": ''.join(lines),
+                    "APPROX POSITION XYZ": position,
+                    "TIME OF FIRST OBS": first_obs[0],
+                    "TIME OF LAST OBS": last_obs[0]
+                }
+                if verbose:
+                    print("... NEW MAXIMUM OBS: True", flush=True)
+            elif verbose:
+                print("... NEW MAXIMUM OBS: False", flush=True)
+        else:
+            site_out_path = output_path.with_suffix(f".{idx:02}.obs")
+            output[site_out_path] = {
+                "RINEX": ''.join(lines),
+                "APPROX POSITION XYZ": position,
+                "TIME OF FIRST OBS": first_obs[0],
+                "TIME OF LAST OBS": last_obs[0]
+            }
+    
+    for path, value in output.items():
+        path.write_text(value.pop("RINEX", None))
+
+    return output
+
+def reach2rnx(rtcm_file: str|Path, reference_date: datetime|None = None, obs_file: str|Path|None = None, single: bool = True, tstart: datetime = None, tend: datetime = None, nav: bool = False, sbs: bool = False, verbose: bool = False) -> tuple[dict|None, Path|None, Path|None]:
+    """Convert a Reach RTCM3 file to RINEX with correct header(s). If single is False, produces a separate file for each site,
+    otherwise extracts only the site with the longest observation. If tstart and tend are given, only observations
+    within the specified interval count against observation length (but the entire observation time is still recorded)."""
+    rtcm_file = Path(rtcm_file)
+    if not obs_file:
+        obs_file = rtcm_file.with_suffix(".obs")
+
+    if not reference_date:
+        if dt := re.search(r'\d{14}', rtcm_file.with_suffix("").name):
+            reference_date = datetime.strptime(dt.group(), '%Y%m%d%H%M%S')
+        else:
+            raise ValueError(f"Could not determine a reference timestamp from the file name ({rtcm_file.name}). Please provide it explicitly.")
+
+    with tmp(rtcm_file.with_name(rtcm_file.stem + "_OBS.tmp")) as obs_path:
+        cmd = ["convbin", "-r", "rtcm3", "-od", "-os", '-tr', reference_date.strftime('%Y/%m/%d'), reference_date.strftime('%H:%M:%S'), "-o", obs_path]
+        if nav:
+            nav_path = obs_path.with_suffix(".nav")
+            cmd.extend(["-n", nav_path])
+        else:
+            nav_path = None
+        if sbs:
+            sbs_path = obs_path.with_suffix(".sbs")
+            cmd.extend(["-s", sbs_path])
+        else:
+            sbs_path = None
+        cmd.append(rtcm_file)
+        result = run(cmd)
+        print(result.stdout)
+        if obs_path.exists():
+            _update_antenna(obs_path, antenna="EML_REACH_RS3", radome="NONE", verbose=verbose)
+            obs_files = _split_by_site_occupation(obs_path, output_path=obs_file, single=single, tstart=tstart, tend=tend, verbose=verbose)
+        else:
+            obs_files = None
+
+    return obs_files, nav_path, sbs_path
+
+def chc2rnx(hcn_file: str|Path, nav: bool = False, sbs: bool = False) -> tuple[Path, Path|None, Path|None]:
+    """Convert a CHCI83 HCN file to RINEX with correct header."""
+    obs_path = hcn_file.with_suffix(".obs")
+    cmd = ["convbin", "-r", "nov", "-od", "-os", "-o", obs_path]
+    if nav:
+        nav_path = hcn_file.with_suffix(".nav")
+        cmd.extend(["-n", nav_path])
+    else:
+        nav_path = None
+    if sbs:
+        sbs_path = hcn_file.with_suffix(".sbs")
+        cmd.extend(["-s", sbs_path])
+    else:
+        sbs_path = None
+    cmd.append(hcn_file)
+    result = run(cmd)
     print(result.stdout)
     if obs_path.exists():
-        _update_antenna(obs_path, antenna="EML_REACH_RS3", radome="NONE")
+        _update_antenna(obs_path, antenna="CHCI83", radome="NONE")
 
     return obs_path, nav_path, sbs_path
 
-def _update_antenna(file_path, antenna: str, radome: str) -> None:
+def _update_antenna(file_path, antenna: str, radome: str, verbose: bool = False) -> None:
     with open(file_path, 'r') as file:
         lines = file.readlines()
-    new_line = f"{' ' * 20}{antenna:<16}{radome:<24}ANT # / TYPE"
+    new_line = f"{' ' * 20}{antenna:<16}{radome:<24}ANT # / TYPE\n"
 
     updated = False
     for i, line in enumerate(lines):
@@ -466,6 +745,9 @@ def _update_antenna(file_path, antenna: str, radome: str) -> None:
 
     with open(file_path, 'w') as file:
         file.writelines(lines)
+    
+    if verbose or Settings().VERBOSE:
+        print(f"Updated RINEX header in {file_path} to set antenna={antenna} and radome={radome}")
 
 def rnx2rtkp(
         rover_obs: str|Path,
@@ -474,6 +756,7 @@ def rnx2rtkp(
         out_path: str|Path,
         config_file: str|Path = None,
         sbs_file: str|Path = None,
+        elevation_mask: float|None = None,
         mocoref_file: str|Path = None,
         mocoref_type: str|None = None,
         mocoref_line: int = 1
@@ -504,19 +787,21 @@ def rnx2rtkp(
                 print("No callibration data available. Using all constellations and frequencies.")
 
     with resource(config_file, "RTKP_CONFIG", antenna=antenna_type, radome=radome) as config:
-        cmd = ['rnx2rtkp', '-k', str(config), '-o', str(out_path)]
+        cmd = ['rnx2rtkp', '-k', str(config), '-o', out_path]
+        if elevation_mask:
+            cmd.extend(['-m', elevation_mask])
         if constellations:
             cmd.extend(["-sys", ",".join(constellations), "-f", freqs])
         if mocoref_file:
-            mocoref_latitude, mocoref_longitude, mocoref_height, mocoref_antenna = read_mocoref(mocoref_file, type=mocoref_type, line=mocoref_line)
-            cmd.extend(["-l", str(mocoref_latitude), str(mocoref_longitude), str(mocoref_height + mocoref_antenna)])
+            (mocoref_latitude, mocoref_longitude, mocoref_height), _ = generate_mocoref(mocoref_file, type=mocoref_type, line=mocoref_line, generate=False)
+            cmd.extend(["-l", mocoref_latitude, mocoref_longitude, mocoref_height])
         if fallback:
             with resource(base_obs) as tmp_obs:
                 _update_antenna(tmp_obs, antenna=antenna_type, radome='NONE')
-                cmd.extend([tmp_obs, base_obs, nav_file])
+                cmd.extend([rover_obs, tmp_obs, nav_file])
                 if sbs_file:
                     cmd.append(sbs_file)
-                print(f"Running RTKP post processing ...\n\tRover: {local(rover_obs)}\n\tBase: {local(base_obs)}\n\tNav:{local(nav_file)}\n", flush=True)
+                print(f"Running RTKP post processing ...\n\tRover: {local(rover_obs)}\n\tBase: {local(tmp_obs)}\n\tNav: {local(nav_file)}\n", flush=True)
                 try: 
                     run(cmd, capture=False)
                 except RuntimeError:
@@ -544,10 +829,16 @@ def _ant_type(rinex_path) -> tuple[None|list[str], None|str]:
             if 'ANT # / TYPE' in line:
                 # ANT TYPE and RADOME is typically in columns 21–60
                 try:
-                    ant_type, radome = line[20:60].split()
+                    spl = line[20:60].split()
+                    if len(spl) == 2:
+                        ant_type, radome = spl
+                    if len(spl) == 1:
+                        ant_type = spl[0]
+                        radome = "NONE"
                     return ant_type, radome
                 except ValueError:
-                    warn("No ANTENNA TYPE specified in RINEX header")
+                    raise ValueError("Failed to parse ANTENNA TYPE from RINEX header")
+    warn("ANTENNA TYPE not specified in RINEX header")
     return None, None
 
 def _parse_atx(file_path, antenna_type, radome, mode: str = "glab") -> tuple[list[str], str, bool]:
@@ -662,7 +953,8 @@ def ppp(
         out_path: str|Path,
         navglo_file: str|Path = None,
         atx_file: str|Path = None,
-        antrec_file: str|Path = None
+        antrec_file: str|Path = None,
+        elevation_mask: float|None = None
     ) -> str:
     """Runs gLAB with static PPP mode to determine the position of a GNSS base from its RINEX observation file.
     Returns the content of the out file."""
@@ -685,6 +977,8 @@ def ppp(
                     '-summary:formalerror3d', '0.002',
                     '-summary:formalerrorhor', '0.0013'
             ]
+            if elevation_mask:
+                cmd.extend(['-pre:elevation', elevation_mask])
             freqs, unavailable, fallback = _parse_atx(receiver_file, antenna_type=antenna_type, radome=radome, mode="glab")
             if fallback:
                 print("Defaulted to NONE radome ...")
@@ -696,13 +990,15 @@ def ppp(
                     cmd.extend(['-pre:sat', unavailable])
             else:
                 print("No callibration data available. Using all frequencies.")
+                cmd.append("--model:recphasecenter")
             if navglo_file:
                 cmd.extend(["-input:navglo", navglo_file])
             if receiver:
                 cmd.extend(["-input:antrec", receiver])
-            print(f"Running station PPP on {local(obs_file)} > {local(out_path)} ...", end=" ", flush=True)
+            print(f"Running station PPP on {local(obs_file)}{f' > {local(out_path)}' if out_path else ''} ...", end=" ", flush=True)
             result = run(cmd)
-            out_path.write_text(result.stdout)
+            if out_path:
+                out_path.write_text(result.stdout)
             print("done. ")
     
     return result.stdout

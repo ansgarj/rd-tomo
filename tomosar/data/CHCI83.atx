@@ -22,14 +22,6 @@ EXTENDED TO OTHER CONSTELLATIONS WITHOUT VERIFICATION       COMMENT
       1.16      1.07     76.64                              NORTH / EAST / UP   
    NOAZI    0.00    2.97    4.69    5.26    5.06    4.47    3.72    2.99    2.60    2.56    2.82    3.48    4.04    4.72    5.19    5.26    4.73
    R01                                                      END OF FREQUENCY
-   E01                                                      START OF FREQUENCY  
-      1.16      1.07     76.64                              NORTH / EAST / UP   
-   NOAZI    0.00    2.97    4.69    5.26    5.06    4.47    3.72    2.99    2.60    2.56    2.82    3.48    4.04    4.72    5.19    5.26    4.73
-   E01                                                      END OF FREQUENCY                                                    END OF FREQUENCY
-   C01                                                      START OF FREQUENCY  
-      1.16      1.07     76.64                              NORTH / EAST / UP   
-   NOAZI    0.00    2.97    4.69    5.26    5.06    4.47    3.72    2.99    2.60    2.56    2.82    3.48    4.04    4.72    5.19    5.26    4.73
-   C01                                                      END OF FREQUENCY
    G02                                                      START OF FREQUENCY  
       0.61     -2.66     69.05                              NORTH / EAST / UP   
    NOAZI    0.00    0.97    1.79    2.52    3.11    3.42    3.60    3.53    3.28    2.98    2.74    2.64    2.57    2.57    2.57    2.67    2.82
@@ -37,15 +29,7 @@ EXTENDED TO OTHER CONSTELLATIONS WITHOUT VERIFICATION       COMMENT
    R02                                                      START OF FREQUENCY  
       0.61     -2.66     69.05                              NORTH / EAST / UP   
    NOAZI    0.00    0.97    1.79    2.52    3.11    3.42    3.60    3.53    3.28    2.98    2.74    2.64    2.57    2.57    2.57    2.67    2.82
-   R02  
-   E02                                                      START OF FREQUENCY  
-      0.61     -2.66     69.05                              NORTH / EAST / UP   
-   NOAZI    0.00    0.97    1.79    2.52    3.11    3.42    3.60    3.53    3.28    2.98    2.74    2.64    2.57    2.57    2.57    2.67    2.82
-   E02  
-   C02                                                      START OF FREQUENCY  
-      0.61     -2.66     69.05                              NORTH / EAST / UP   
-   NOAZI    0.00    0.97    1.79    2.52    3.11    3.42    3.60    3.53    3.28    2.98    2.74    2.64    2.57    2.57    2.57    2.67    2.82
-   C02  
+   R02                                                      END OF FREQUENCY
    G01                                                      START OF FREQ RMS   
       0.30      0.80      0.20                              NORTH / EAST / UP   
    NOAZI    0.00    0.20    0.30    0.30    0.30    0.30    0.30    0.30    0.30    0.30    0.30    0.30    0.30    0.30    0.30    0.30    0.20
