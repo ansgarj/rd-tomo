@@ -69,8 +69,12 @@ def init(
     Note that the path must point to a directory which contains exactly one set of drone data.
     For other files, tomosar init will use the first matching file it finds.
 
-    For mocoref data a mocoref.moco file is prioritized followed by a .json file, with the underlying assumption
-    that these have been generated from raw mocoref data; then a .llh log is prioritized over a .csv file. 
+    For the GNSS base station a RINEX OBS file is prioritized over other files: HCN files and RTCM3 files are also accepted,
+    as well as Reach ZIP archives.
+
+    For mocoref data a mocoref.moco file is prioritized followed by a .json file, with the underlying assumption that these
+    have been generated from raw mocoref data; then a .llh log is prioritized over a .csv file. If a Reach ZIP archive is
+    used as the source of the GNSS base station file, the mocoref file will also be generated from there. 
     
     The files are converted where applicable and copied/moved into a processing directory, in such a way that the content
     of the data directory where tomosar init was initiated is left unaltered. Then preprocessing is initiated [NOT IMPLEMENTED]

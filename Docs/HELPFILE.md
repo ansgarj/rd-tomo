@@ -17,6 +17,24 @@ Running `tomosar settings` prints the current settings. These are stored locally
 
 **Note**: `null` values indicate an internal file. You can change this to use your own file, and reset by `tomosar clear`. 
 
+## `init`
+Running `tomosar init` Searches recursively to find matching files:
+- Drone GNSS .bin and .log;
+- Drone IMU .bin and .log;
+- Drone Radar .bin, .log and .cfg;
+- GNSS base station; and
+- Mocoref data or precise position of GNSS base station.
+
+If the GNSS base station file is missing, can fetch files from the nearest Swepos station, and can supplement Mocoref data by performing static PPP on the base station. Note that the path must point to a directory which contains exactly one set of drone data. For other files, tomosar init will use the first matching file it finds.
+
+For the GNSS base station a RINEX OBS file is prioritized over other files: HCN files and RTCM3 files are also accepted, as well as Reach ZIP archives.
+
+For mocoref data a mocoref.moco file is prioritized followed by a .json file, with the underlying assumption that these have been generated from raw mocoref data; then a .llh log is prioritized over a .csv file. If a Reach ZIP archive is used as the source of the GNSS base station file, the mocoref file will also be generated from there.
+
+The files are converted where applicable and copied/moved into a processing directory, in such a way that the content of the data directory where tomosar init was initiated is left unaltered. Then preprocessing is initiated \[ONLY GNSS IMPLEMENTED\].
+
+Note that tomosar init can also be run inside a processing directory, in which case it simply initiates preprocessing \[ONLY GNSS IMPLEMENTED\]. Any directory inside the settings specified PROCESSING_DIRS is assumed to be a processing directory, and any directory outside is by default assumed to be a data directory (this behaviour can be overridden by the --processing option).
+
 ## `trackfinder`
 Running `tomosar trackfinder` on a `.moco` CSV file correctly identifies all tested flight timestamps and generates the `radar[...].inf` file for spiral flight processing. Can be used to generate the correct timestamps for linear flights by `trackfinder -l` or more generally `trackfinder -l X`. 
 
@@ -38,6 +56,14 @@ Running `tomosar station-ppp` on a GNSS base station RINEX observation file will
 ## `mocoref`
 Running `tomosar mocoref` on a data file (CSV, JSON or LLH) generates a `mocoref.moco` file. For a CSV file it defaults to the first line, but this can be changed with `--line`, and reads columns with names matching the names specified in the settings. A JSON file is assumed to contain a dict with the keys specified in the settings. A LLH log is assumed to have no header and to have columns matching the LLH log from the Emlid Reach RS3. 
 
+## `extract-reach`
+Running `tomosar extract-reach` extracts a Reach ZIP archive to produce:
+- A RINEX OBS file for a single site,
+- A mocoref.moco for the OBS file, and
+- A RINEX NAV file (optional).
+
+Optionally takes a RINEX OBS file as input to extract from the archive the OBS file which has the greatest overlap with the input RINEX file. Otherwise extracts the longest segment.
+
 ## `load`
 Running `tomosar load` loads a single _Tomogram Directory_ or multiple _Tomogram Directories_ into a `TomoScenes` object, and then opens an interactive Python console with the `TomoScenes` object stored under `tomos`. It can be used as an entry point instead of having to manually import and run inside Python where path auto-completion may not work.  Running `tomosar load --info` instead extracts and prints basic information without requiring the entire directory structure to be loaded, and then exits.
 
@@ -50,11 +76,10 @@ The `tomosar test` subcommand contains additional subcommands that can be used t
 - `tomosar test station-ppp` which tests `station-ppp` against ground truth as found in a `mocoref` data file
 
 ## Planned additions
-1. `tomosar init` \[**NOT IMPLEMENTED**\] directly generates a processing directory from a _Data Directory_. It will identify what files are present, if necessary generate a `mocoref.moco` file from a CSV file or `.json` file or if necessary subsititute for a missing mocoref data by running `ppp` on the GNSS base station observation file, or subsitute for missing GNSS base station files by downloading rinex files from _Swepos_ using `swepos`. Then it will copy all necessary files into a processing directory located inside the folder pointed to by the `PROCESSING_DIRS` setting (**default**: `$HOME/Radar/Processing`). The generated directory will have the correct file structure for **Radaz** functions. Finally `tomprocess init` initiates preprocessing in the processing directory. **Note**: if run inside a processing directory, simply initiaties preprocessing.
-2. `tomosar process` \[**NOT IMPLEMENTED**\] chains `slice` and `forge` to generate a _Tomogram Directory_, or content for one. 
-3. `tomsoar slice` \[**NOT IMPLEMENTED**\] initiates a _backprojection_ loop to generate all slices for the specified tomogram.
-4. `tomosar view` \[**NOT IMPLEMENTED**\] contains multiple subcommands used for viewing tomograms, statistics, e.t.c 
-5. `tomosar optimize` \[**NOT IMPLEMENTED**\] plans a flight for optimizing _nominal_ SAR parameters according to given restraints.
-6. `tomosar plan` \[**NOT IMPLEMENTED**\] interactively models a _planned flight_ to allow validation of ideal SAR parameters across different tomograms (**Note**: this does not take into account flight instabilities that can occur during the actual flight).
-7. `tomosar fetch-data` \[**NOT IMPLEMENTED**\] fetches the **most recent** _drone data_ and generates a _Data Directory_ inside the folder pointed to by the `DATA_DIRS` setting (**default**: `$HOME/Radar/Data`)
-8. `tomoprocess analysis` \[**NOT IMPLEMENTED**\] analyzes the spiral flights and models them. Used to verify _idealized flight_ vs. _planned flight_, and to inspect _realized flight_ parameters, including anisotropies from flight instabilities. Can provide optimal processing parameters for `tomo`/`slice`. 
+1. `tomosar process` \[**NOT IMPLEMENTED**\] chains `slice` and `forge` to generate a _Tomogram Directory_, or content for one. 
+2. `tomsoar slice` \[**NOT IMPLEMENTED**\] initiates a _backprojection_ loop to generate all slices for the specified tomogram.
+3. `tomosar view` \[**NOT IMPLEMENTED**\] contains multiple subcommands used for viewing tomograms, statistics, e.t.c 
+4. `tomosar optimize` \[**NOT IMPLEMENTED**\] plans a flight for optimizing _nominal_ SAR parameters according to given restraints.
+5. `tomosar plan` \[**NOT IMPLEMENTED**\] interactively models a _planned flight_ to allow validation of ideal SAR parameters across different tomograms (**Note**: this does not take into account flight instabilities that can occur during the actual flight).
+6. `tomosar fetch-data` \[**NOT IMPLEMENTED**\] fetches the **most recent** _drone data_ and generates a _Data Directory_ inside the folder pointed to by the `DATA_DIRS` setting (**default**: `$HOME/Radar/Data`)
+7. `tomoprocess analysis` \[**NOT IMPLEMENTED**\] analyzes the spiral flights and models them. Used to verify _idealized flight_ vs. _planned flight_, and to inspect _realized flight_ parameters, including anisotropies from flight instabilities. Can provide optimal processing parameters for `tomo`/`slice`. 
