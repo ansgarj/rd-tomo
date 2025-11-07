@@ -9,7 +9,7 @@ import csv
 import struct
 import numpy as np
 
-from ..gnss import extract_rnx_info, read_out_file, read_pos_file
+from ..gnss import extract_rnx_info, read_glab_out, read_rnx2rtkp_out
 from ..binaries import rnx2rtkp, resource
 from ..config import PACKAGE_PATH
 from .setup_tools import install_changed
@@ -155,7 +155,7 @@ def read_imu(file: Path, num: int|None, processed: bool = False) -> None:
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
 def inspect_out(file: Path) -> None:
     """Inspect the .out file produced by glab."""
-    _, _, conv_idx, diff, residuals = read_out_file(
+    _, _, conv_idx, diff, residuals = read_glab_out(
         file_path=file,
         verbose=True
     )
@@ -179,7 +179,6 @@ def inspect_out(file: Path) -> None:
         plt.title("Divergence plot")
         plt.legend()
     plt.show()
-
 
 def plot_coordinates(coords1, coords2, labels, title1, title2):
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
@@ -241,7 +240,7 @@ def compare_rtkp(rover_obs, base1_obs, base2_obs, nav_path, conf_path, sbs_path,
             sbs_file=sbs_path
         )
     # Read results
-    coords1, q1, t1 = read_pos_file(pos1_path)
+    coords1, q1, t1 = read_rnx2rtkp_out(pos1_path)
     # Display Q=1 percentage
     print(f"{pos1_path} Q1: {q1} %")
 
@@ -257,7 +256,7 @@ def compare_rtkp(rover_obs, base1_obs, base2_obs, nav_path, conf_path, sbs_path,
             sbs_file=sbs_path
         )
     # Read results
-    coords2, q2, t2 = read_pos_file(pos2_path)
+    coords2, q2, t2 = read_rnx2rtkp_out(pos2_path)
     # Display Q=1 percentage
     print(f"{pos2_path} Q1: {q2} %")
 
