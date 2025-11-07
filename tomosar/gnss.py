@@ -789,9 +789,11 @@ def fetch_swepos(
     
 def station_ppp(
         obs_path: str|Path,
-        navglo_path: str|Path = None,
-        atx_path: str|Path = None,
-        antrec_path: str|Path = None,
+        navglo_path: str|Path|None = None,
+        atx_path: str|Path|None = None,
+        antrec_path: str|Path|None = None,
+        sp3_file: str|Path|None = None,
+        clk_file: str|Path|None = None,
         max_downloads: int = 10,
         max_retries: int = 3,
         out_path: str|Path|None = None,
@@ -800,39 +802,57 @@ def station_ppp(
         dry: bool = False,
         retain: bool = False,
         make_mocoref: bool = True
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, float] | tuple[np.ndarray, Path, Path]:
     """Runs static PPP on a base observation file by first downloading matching precise ephemeris files from gssc.esa.int.
     Input parameters:
     - navglo_path: file containing navigation data for GLONASS (can be a merged/general navigation file)
     - atx_path: file containing absolute calibration data for antennas
     - antrec_path: file containing absolute calibration data for the base antenna (overrides atx_path for base)
+    - sp3_file: full or orbit SP3 file
+    - clk_file: clock file complementing orbit SP3 file
     - max_downloads: number of parallel downloads that will be attempted
     - max_retries: number of times a file download is attempted before failing
     - out_path: file where output is stored (if None it is not stored)
     - header: modify the rinex header with the new position
     - dry: only show which files would be downloaded
     - retain: retains downloaded ephemeris data after finishing
-    - mocoref: generate mocoref.moco file with position"""
+    - mocoref: generate mocoref.moco file with position
+    
+    Output:
+    - Base position
+    - Rotation matrix from ECEF to local ENU at base position
+    - Distance from header position to base position
+    OR if retain:
+    - Base postion
+    - SP3 file path
+    - CLK file path"""
+
     if not obs_path.is_file():
         raise FileNotFoundError(f"Rinex observation file not found: {obs_path}")
 
     if out_path:
         out_path = Path(out_path)
-        output_dir = out_path.parent
-        output_dir.mkdir(exist_ok=True)
+        if out_path.is_dir():
+            output_dir = out_path
+            out_path = None
+        else:
+            output_dir = out_path.parent
+            output_dir.mkdir(exist_ok=True)
     else:
         output_dir = obs_path.parent
 
     start_utc, end_utc, approx_pos, antenna_delta = extract_rnx_info(obs_path)
     with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
-        failed = fetch_sp3_clk(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, max_workers=max_downloads, max_retries=max_retries, dry=dry)
-        if failed:
-            raise FileNotFoundError("Download of precise ephemeris and clock data from ESA failed.")
-        
-        sp3_file, clk_file = merge_ephemeris(tmp_dir)
-        if retain:
-            sp3_file = shutil.move(sp3_file, sp3_file.parent.parent)
-            clk_file = shutil.move(clk_file, clk_file.parent.parent)
+        if not sp3_file:
+            failed = fetch_sp3_clk(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, max_workers=max_downloads, max_retries=max_retries, dry=dry)
+            if failed:
+                raise FileNotFoundError("Download of precise ephemeris and clock data from ESA failed.")
+            
+            sp3_file, clk_file = merge_ephemeris(tmp_dir)
+            if retain:
+                # Move files out of temporary directory
+                sp3_file = shutil.move(sp3_file, sp3_file.parent.parent)
+                clk_file = shutil.move(clk_file, clk_file.parent.parent)
 
         # Run PPP command
         out = ""
@@ -874,6 +894,9 @@ def station_ppp(
         }
         generate_mocoref(mocoref, generate=True)
     
+    if retain:
+        # Return only pos along with SP3 and CLK file
+        return pos, sp3_file, clk_file
     return pos, rotation, distance
 
 def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_dir: str|Path|None = None, rnx_file: Path|str|None = None, nav: bool = False, verbose: bool = False) -> tuple[dict[Path, dict], tuple[Path|None, Path|None, Path|None]]:
