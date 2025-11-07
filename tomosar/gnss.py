@@ -396,14 +396,18 @@ def date_to_gps_week(input_date: datetime) -> int:
     gps_week = delta.days // 7
     return gps_week
 
-def read_pos_file(filepath: str|Path) -> tuple[np.ndarray, float, np.ndarray]:
+def read_rnx2rtkp_out(input: str|Path) -> tuple[np.ndarray, float, np.ndarray]:
     """Parses a rnx2rtkp .pos file.
     Returns:
         array with the coordinates,
         float with the percentage of Q1,
         array with the GPST corresponding to the coordinates"""
-    with open(filepath, 'r') as f:
-        lines = f.readlines()
+    
+    if isinstance(input, str):
+        lines = input.splitlines()
+    elif isinstance(input, Path):
+        with open(input, 'r') as f:
+            lines = f.readlines()
 
     # Skip header lines
     data_lines = [line for line in lines if not line.startswith('%')]
@@ -413,7 +417,7 @@ def read_pos_file(filepath: str|Path) -> tuple[np.ndarray, float, np.ndarray]:
         data = [list(map(float, line.split())) for line in data_lines]
         data = np.array(data)
     except ValueError:
-        raise ValueError(f"Could not parse numeric data from {filepath}")
+        raise ValueError(f"Could not parse numeric data from {input}")
     
 
     # Auto-detect coordinate columns (assumes columns 3–5 are E/N/U or X/Y/Z)
@@ -423,11 +427,11 @@ def read_pos_file(filepath: str|Path) -> tuple[np.ndarray, float, np.ndarray]:
         q = data[:, 5]
         q = np.sum(q == 1) / len(q) * 100
     else:
-        raise ValueError(f"Unexpected format in {filepath}: not enough columns")
+        raise ValueError(f"Unexpected format in {input}: not enough columns")
     
     return coords, q, gpst
 
-def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarray,
+def read_glab_out(input: str|Path, verbose: bool = False) -> tuple[np.ndarray,
                                                                        np.ndarray,
                                                                        int,
                                                                        np.ndarray,
@@ -444,8 +448,8 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
         return full_datetime
 
     diff_n, diff_e, diff_u = [], [], []
-    if len(file_path) < 1000:
-        with open(file_path, 'r') as f:
+    if isinstance(input, Path):
+        with open(input, 'r') as f:
             for line in f:
                 if line.startswith("OUTPUT"):
                     parts = line.split()
@@ -464,7 +468,7 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
                     except (IndexError, ValueError):
                         continue  # Skip malformed lines
     else:
-        lines = file_path.splitlines()
+        lines = input.splitlines()
         for line in lines:
             if line.startswith("OUTPUT"):
                 parts = line.split()
@@ -501,7 +505,7 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
     conv_time = ts[idx] - ts[0]
     total_time = ts[-1] - ts[0]
     if not conv.any():
-        raise RuntimeError(f"Station PPP failed to converge: {file_path if len(file_path) < 1000 else 'gLAB OUTPUT'} (total runtime: {total_time})")
+        raise RuntimeError(f"Station PPP failed to converge: {input if isinstance(input, Path) else 'gLAB OUTPUT'} (total runtime: {total_time})")
 
     # Mean position after convergence
     x_mean = np.nanmean(x[conv])
@@ -531,35 +535,156 @@ def read_out_file(file_path: str|Path, verbose: bool = False) -> tuple[np.ndarra
 
     return mean, rotation,  idx, diff, np.asarray((x_res, y_res, z_res))
 
+def modify_config(config_path: Path, standard: bool = False, precise: bool = False) -> None:
+    """
+    Modifies an existing RTKLIB config file to enable precise ephemeris mode
+    and sets the paths to SP3 and CLK files.
+
+    Parameters:
+    - config_path: Path to the existing config file
+    - sp3_path: Path to the SP3 file
+    - clk_path: Path to the CLK file
+    - output_path: Path to save the modified config file
+    """
+
+    if not (standard or precise):
+        warn("Running modify_config with standard=False and precise=False has no effect.")
+        return
+    
+    # Read the original config file
+    with open(config_path, 'r') as file:
+        lines = file.readlines()
+
+    if precise:
+        # Flag to check if the required field is found
+        sateph_found = False
+
+        # Modify the relevant lines
+    for i, line in enumerate(lines):
+        if precise:
+            # Modify required field if found
+            if line.strip().startswith('pos1-sateph'):
+                lines[i] = 'pos1-sateph =1\n'
+                sateph_found = True
+        if standard:
+            # Remove explorer specific fields
+            if "# This requires the Explorer version of RTKLIB" in line:
+                lines[i] = ''
+
+    if precise:
+        # Append missing fields if not found
+        if not sateph_found:
+            lines.append('pos1-sateph =1\n')
+
+    # Write the modified config to the output file
+    with open(config_path, 'w') as file:
+        file.writelines(lines)
+
 def rtkp(
         rover_obs: str|Path,
         base_obs: str|Path,
         nav_file: str|Path,
-        out_path: str|Path,
-        config_file: str|Path = None,
-        sbs_file: str|Path = None,
+        out_path: str|Path|None = None,
+        config_file: str|Path|None = None,
+        sbs_file: str|Path|None = None,
+        sp3_file: str|Path|None = None,
+        precise: bool = False,
+        clk_file: str|Path|None = None,
         elevation_mask: float|None = None,
         mocoref_file: str|Path = None,
         mocoref_type: str|None = None,
-        mocoref_line: int = 1
+        mocoref_line: int = 1,
+        max_downloads: int = 10,
+        max_retries: int = 3,
+        dry: bool = False,
+        retain: bool = False
 ) -> None:
     """Calls rnx2rtkp and reads the .pos file"""
-    rnx2rtkp(
-        rover_obs=rover_obs,
-        base_obs=base_obs,
-        nav_file=nav_file,
-        out_path=out_path,
-        config_file=config_file,
-        sbs_file=sbs_file,
-        elevation_mask=elevation_mask,
-        mocoref_file=mocoref_file,
-        mocoref_type=mocoref_type,
-        mocoref_line=mocoref_line
-    )
-    if not out_path.is_file():
-        raise FileNotFoundError(f"Could not find generated .pos file: {out_path}")
 
-    coords, q, gpst = read_pos_file(out_path)
+    rover_obs = Path(rover_obs)
+    if not rover_obs.is_file():
+        raise FileNotFoundError(f"Rover OBS file not found: {rover_obs}")
+
+    base_obs = Path(base_obs)
+    if not base_obs.is_file():
+        raise FileNotFoundError(f"Base OBS file not found: {base_obs}")
+    
+    nav_file = Path(nav_file)
+    if not nav_file.is_file():
+        raise FileNotFoundError(f"NAV file not found: {nav_file}")
+
+
+    if out_path:
+        out_path = Path(out_path)
+        if out_path.is_dir():
+            output_dir = out_path
+            out_path = None
+        else:
+            output_dir = out_path.parent
+            output_dir.mkdir(exist_ok=True, parents=True)
+    else:
+        output_dir = rover_obs.parent
+
+    print(f"Running RTKP post processing ...\n  Rover: {local(rover_obs)}\n  Base: {local(base_obs)}\n  Nav: {local(nav_file)}\n", flush=True)
+    with resource(config_file, "RTKP_CONFIG") as config:
+        if sp3_file or precise:
+            # Modify to precise pos1-eph mode
+            modify_config(config, precise=True)
+            if not sp3_file:
+                start_utc, end_utc, _, _ = extract_rnx_info(base_obs)
+                with tmp(out_path.parent / "tmp", allow_dir=True) as tmp_dir:
+                    if not sp3_file:
+                        failed = fetch_sp3_clk(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, max_workers=max_downloads, max_retries=max_retries, dry=dry)
+                        if failed:
+                            raise FileNotFoundError("Download of precise ephemeris and clock data from ESA failed.")
+                        
+                        sp3_file, clk_file = merge_ephemeris(tmp_dir)
+                        if retain:
+                            # Move files out of temporary directory
+                            sp3_file = shutil.move(sp3_file, out_path.parent)
+                            clk_file = shutil.move(clk_file, out_path.parent)
+        if dry:
+            return
+        try:
+            out = rnx2rtkp(
+                rover_obs=rover_obs,
+                base_obs=base_obs,
+                nav_file=nav_file,
+                out_path=out_path,
+                config_file=config,
+                sbs_file=sbs_file,
+                sp3_file=sp3_file,
+                clk_file=clk_file,
+                elevation_mask=elevation_mask,
+                mocoref_file=mocoref_file,
+                mocoref_type=mocoref_type,
+                mocoref_line=mocoref_line
+            )
+        except RuntimeError:
+            # Try without Explorer specific options
+            modify_config(config, standard=True)
+            out = rnx2rtkp(
+                rover_obs=rover_obs,
+                base_obs=base_obs,
+                nav_file=nav_file,
+                out_path=out_path,
+                config_file=config,
+                sbs_file=sbs_file,
+                sp3_file=sp3_file,
+                clk_file=clk_file,
+                elevation_mask=elevation_mask,
+                mocoref_file=mocoref_file,
+                mocoref_type=mocoref_type,
+                mocoref_line=mocoref_line
+            )
+
+    if out_path:
+        if out_path.is_file():
+            out = out_path
+        else:
+            raise FileNotFoundError(f"Could not find generated .pos file: {out_path}")
+
+    coords, q, gpst = read_rnx2rtkp_out(out)
     print(f"Quality conversion: Q1 = {q:.2f} %")
 
 def detect_convergence_and_mean(x_vals, y_vals, z_vals, x_err, y_err, z_err, err, window_size=100, threshold_percentile=10, verbose: bool = False):
@@ -827,6 +952,7 @@ def station_ppp(
     - SP3 file path
     - CLK file path"""
 
+    obs_path = Path(obs_path)
     if not obs_path.is_file():
         raise FileNotFoundError(f"Rinex observation file not found: {obs_path}")
 
@@ -837,7 +963,7 @@ def station_ppp(
             out_path = None
         else:
             output_dir = out_path.parent
-            output_dir.mkdir(exist_ok=True)
+            output_dir.mkdir(exist_ok=True, parents=True)
     else:
         output_dir = obs_path.parent
 
@@ -851,8 +977,8 @@ def station_ppp(
             sp3_file, clk_file = merge_ephemeris(tmp_dir)
             if retain:
                 # Move files out of temporary directory
-                sp3_file = shutil.move(sp3_file, sp3_file.parent.parent)
-                clk_file = shutil.move(clk_file, clk_file.parent.parent)
+                sp3_file = shutil.move(sp3_file, output_dir)
+                clk_file = shutil.move(clk_file, output_dir)
 
         # Run PPP command
         out = ""
@@ -872,7 +998,7 @@ def station_ppp(
         raise FileNotFoundError(f"Cannot find generated out file: {out_path}")
 
     # Extract position
-    pos, rotation, _, _, _ = read_out_file(out, verbose=True)
+    pos, rotation, _, _, _ = read_glab_out(out, verbose=True)
     # Update position to be to the ARP
     pos = pos - rotation.T @ antenna_delta
 

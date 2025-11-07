@@ -26,6 +26,7 @@ from ..transformers import ecef_to_geo
 @click.option("--llh", "is_llh", is_flag=True, help="Force mocoref data to be read from LLH file")
 @click.option("-h", "--header", is_flag=True, help="Read mocoref data from RINEX header (no separate file, use ONLY if RINEX header is known to contain precise position)")
 @click.option("-p", "--processing", "is_processing_dir", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
+@click.option("-b", "--broadcast", "use_broadcast", is_flag=True, help="Do not use precise ephemeris data")
 @click.option("-t", "--tag", default = "", flag_value=date.today().strftime('%Y%m%d'), help="Tag processing directory with specified string (default: the date of today)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 @click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
@@ -47,6 +48,7 @@ def init(
     is_llh: bool,
     header: bool,
     is_processing_dir: bool,
+    use_broadcast: bool,
     tag: str,
     config: Path | None,
     atx: Path | None,
@@ -77,9 +79,11 @@ def init(
     used as the source of the GNSS base station file, the mocoref file will also be generated from there. 
     
     The files are converted where applicable and copied/moved into a processing directory, in such a way that the content
-    of the data directory where tomosar init was initiated is left unaltered. Then preprocessing is initiated [NOT IMPLEMENTED]
+    of the data directory where tomosar init was initiated is left unaltered. Then preprocessing is initiated [ONLY GNSS IMPLEMENTED].
+    By default tomosar init will use precise ephemeris data for the RTKP post processing, and will download this data if not
+    available (disable by running with --broadcast)
     
-    Note that tomosar init can also be run inside a processing directory, in which case it simply initiates preprocessing [NOT IMPLEMENTED].
+    Note that tomosar init can also be run inside a processing directory, in which case it simply initiates preprocessing [ONLY GNSS IMPLEMENTED].
     Any directory inside the settings specified PROCESSING_DIRS is assumed to be a processing directory, and any directory
     outside is by default assumed to be a data directory (this behaviour can be overridden by the --processing option)."""
     
@@ -143,11 +147,17 @@ def init(
         "LLH": re.compile(r"^.+\.(llh|LLH)"),
         "CSV": re.compile(r"^.+\.(csv|CSV)$"),
     }
+
+    sp3_patterns: dict[str, re.Pattern] = {
+        "SP3": re.compile(r"^.+\.(sp3|SP3)$"),
+        "CLK": re.compile(r"^.+\.(clk|CLK)$")
+    }
     
     # Dicts to store matches
     drone_files: dict[str, list[tuple[Path, datetime]]] = {key: [] for key in drone_patterns}
     gnss_files: dict[str, list[Path]] = {key: [] for key in gnss_patterns}
     mocoref_files: dict[str, list[Path]] = {key: [] for key in mocoref_patterns}
+    sp3_files: dict[str, list[Path]] = {key: [] for key in sp3_patterns}
     navglo = []
 
     # Search recursively
@@ -173,6 +183,10 @@ def init(
                         match = regex.match(p.name)
                         if match:
                             mocoref_files[key].append(p)
+        for key, regex in sp3_patterns.items():
+            match = regex.match(p.name)
+            if match:
+                sp3_files[key].append(p)
 
     # Ensure that exactly one file is found for each drone type with matching datetimes and extract nominal datetime
     dt = None
@@ -204,6 +218,8 @@ def init(
 
     # Work on base OBS and mocoref.moco
     with tmp("tmp", allow_dir=True) as tmp_dir:
+        sp3_file = None
+        clk_file = None
         if swepos:
             if is_zip or is_mocoref or is_csv or is_json or is_llh:
                 warn("--swepos used: other mocoref options ignored")
@@ -312,7 +328,7 @@ def init(
                     navglo = navglo[0]
                 else:
                     navglo = None
-                base_pos, _, _ = run_station_ppp(
+                base_pos, sp3_file, clk_file = run_station_ppp(
                     obs_path=base_obs,
                     navglo_path=navglo,
                     atx_path=atx,
@@ -320,8 +336,9 @@ def init(
                     max_downloads=downloads,
                     max_retries=attempts,
                     elevation_mask=elevation_mask,
-                    out_path=None,
+                    out_path=tmp_dir,
                     header=False,
+                    retain=True
                 )
                 lon, lat, h = ecef_to_geo.transform(*base_pos)
                 mocoref_dict = {
@@ -372,6 +389,11 @@ def init(
         # Initiate base_obs and mocoref_file
         base_obs = initiate_file(base_obs, ground_dir)
         mocoref_file = initiate_file(mocoref_file, mocoref_dir)
+
+        # If station-ppp was used initate SP3 and CLK files
+        if ppp:
+            sp3_file = initiate_file(sp3_file, radar_dir)
+            clk_file = initiate_file(clk_file, radar_dir)
         
         # Move into processing dir
         os.chdir(processing_dir)
@@ -388,6 +410,9 @@ def init(
         base_obs=base_obs,
         nav_file=rover_nav,
         sbs_file=rover_sbs,
+        sp3_file=sp3_file,
+        clk_file=clk_file,
+        precise=not use_broadcast,
         out_path=rover_obs.with_suffix(".pos"),
         config_file=config,
         elevation_mask=elevation_mask,

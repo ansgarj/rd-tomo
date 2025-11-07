@@ -31,7 +31,7 @@ For the GNSS base station a RINEX OBS file is prioritized over other files: HCN 
 
 For mocoref data a mocoref.moco file is prioritized followed by a .json file, with the underlying assumption that these have been generated from raw mocoref data; then a .llh log is prioritized over a .csv file. If a Reach ZIP archive is used as the source of the GNSS base station file, the mocoref file will also be generated from there.
 
-The files are converted where applicable and copied/moved into a processing directory, in such a way that the content of the data directory where tomosar init was initiated is left unaltered. Then preprocessing is initiated \[ONLY GNSS IMPLEMENTED\].
+The files are converted where applicable and copied/moved into a processing directory, in such a way that the content of the data directory where tomosar init was initiated is left unaltered. Then preprocessing is initiated \[ONLY GNSS IMPLEMENTED\]. By default `tomosar init` will use precise ephemeris data for the RTKP post processing, and will download this data if not available (disable by running with `--broadcast`)
 
 Note that tomosar init can also be run inside a processing directory, in which case it simply initiates preprocessing \[ONLY GNSS IMPLEMENTED\]. Any directory inside the settings specified PROCESSING_DIRS is assumed to be a processing directory, and any directory outside is by default assumed to be a data directory (this behaviour can be overridden by the --processing option).
 

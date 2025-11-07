@@ -21,7 +21,7 @@ from .utils import changed, warn, local, generate_mocoref
 from .config import Settings, LOCAL
 
 # Catch-all run command for binariy executables
-def run(cmd: str | list, capture: bool = True):
+def run(cmd: str | list, capture: bool = True) -> subprocess.CompletedProcess:
     
     if not isinstance(cmd, list):
         cmd = [cmd]
@@ -794,13 +794,15 @@ def rnx2rtkp(
         base_obs: str|Path,
         nav_file: str|Path,
         out_path: str|Path,
-        config_file: str|Path = None,
-        sbs_file: str|Path = None,
+        config_file: str|Path|None = None,
+        sbs_file: str|Path|None = None,
+        sp3_file: str|Path|None = None,
+        clk_file: str|Path|None = None,
         elevation_mask: float|None = None,
-        mocoref_file: str|Path = None,
+        mocoref_file: str|Path|None = None,
         mocoref_type: str|None = None,
         mocoref_line: int = 1
-) -> None:
+) -> str:
     """Runs RTKLIB's rnx2rtkp with dynamic command construction based on available resources."""
     antenna_type, radome = _ant_type(base_obs)
     print(f"Detected base antenna type: {antenna_type} {radome}")
@@ -826,42 +828,33 @@ def rnx2rtkp(
             else:
                 print("No callibration data available. Using all constellations and frequencies.")
 
-    with resource(config_file, "RTKP_CONFIG", antenna=antenna_type, radome=radome) as config:
-        cmd = ['rnx2rtkp', '-k', str(config), '-o', out_path]
-        if elevation_mask:
-            cmd.extend(['-m', elevation_mask])
-        if constellations:
-            cmd.extend(["-sys", ",".join(constellations), "-f", freqs])
-        if mocoref_file:
-            (mocoref_latitude, mocoref_longitude, mocoref_height), _ = generate_mocoref(mocoref_file, type=mocoref_type, line=mocoref_line, generate=False)
-            cmd.extend(["-l", mocoref_latitude, mocoref_longitude, mocoref_height])
+    cmd = ['rnx2rtkp']
+    if out_path:
+        capture = False
+        ['-o', out_path]
+    else:
+        capture = True
+    if config_file:
+        cmd.extend(['-k', config_file])
+    if elevation_mask:
+        cmd.extend(['-m', elevation_mask])
+    if constellations:
+        cmd.extend(["-sys", ",".join(constellations), "-f", freqs])
+    if mocoref_file:
+        (mocoref_latitude, mocoref_longitude, mocoref_height), _ = generate_mocoref(mocoref_file, type=mocoref_type, line=mocoref_line, generate=False)
+        cmd.extend(["-l", mocoref_latitude, mocoref_longitude, mocoref_height])
+    with resource(base_obs) as tmp_obs:
         if fallback:
-            with resource(base_obs) as tmp_obs:
-                _update_antenna(tmp_obs, antenna=antenna_type, radome='NONE')
-                cmd.extend([rover_obs, tmp_obs, nav_file])
-                if sbs_file:
-                    cmd.append(sbs_file)
-                print(f"Running RTKP post processing ...\n\tRover: {local(rover_obs)}\n\tBase: {local(tmp_obs)}\n\tNav: {local(nav_file)}\n", flush=True)
-                try: 
-                    run(cmd, capture=False)
-                except RuntimeError:
-                    if config_file is None:
-                        with resource(None, "RTKP_CONFIG", standard=True) as new_config:
-                            cmd[2] = new_config
-                            run(cmd)
-        else:        
-            cmd.extend([rover_obs, base_obs, nav_file])
-            if sbs_file:
-                cmd.append(sbs_file)
-            print(f"Running RTKP post processing ...\n\tRover: {local(rover_obs)}\n\tBase: {local(base_obs)}\n\tNav:{local(nav_file)}\n", flush=True)
-            try: 
-                run(cmd, capture=False)
-            except RuntimeError:
-                if config_file is None:
-                    with resource(None, "RTKP_CONFIG", standard=True) as new_config:
-                        cmd[2] = new_config
-                        run(cmd)
-    print("Done.")
+            _update_antenna(tmp_obs, antenna=antenna_type, radome='NONE')
+        cmd.extend([rover_obs, tmp_obs, nav_file])
+        if sbs_file:
+            cmd.append(sbs_file)
+        if sp3_file:
+            cmd.append(sp3_file)
+        if clk_file:
+            cmd.append(clk_file)
+        result = run(cmd, capture=capture)
+        return result.stdout
 
 def _ant_type(rinex_path) -> tuple[None|list[str], None|str]:
     with open(rinex_path, 'r') as f:

@@ -5,7 +5,7 @@ from pathlib import Path
 import math
 
 from .. import ubx2rnx, rnx2rtkp
-from ..gnss import fetch_swepos, station_ppp as run_ppp, read_pos_file, reachz2rnx
+from ..gnss import fetch_swepos, station_ppp as run_ppp, read_rnx2rtkp_out, reachz2rnx
 from ..utils import generate_mocoref
 from ..config import LOCAL
 from ..binaries import resource, tmp
@@ -57,7 +57,7 @@ def gnss(savar) -> None:
         out_path = rover_obs.with_suffix(".pos")
         rnx2rtkp(rover_obs, swepos_obs, rover_nav, out_path)
         try: 
-            _, q, gpst = read_pos_file(out_path)
+            _, q, gpst = read_rnx2rtkp_out(out_path)
             dur = timedelta(seconds=gpst[-1] - gpst[0])
             print(f"Total {dur} processed, Q1={q:.2f} %")
         except:

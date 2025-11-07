@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - `tomosar.binaries.tmp` no longer creates parents to temporary directories (which were not temporary), but fails if all parents do not exist
+- `tomosar.gnss.station_ppp` now allows input of SP3 and/or CLK files instead of always downloading, and accepts full SP3 files as input; it also returns the SP3 and CLK paths if retain is used (but not rotation matrix and distance). The output directory for the files can also be specified without specifying a path for `.out` file by inputing a directory as `out_path`. 
+- `tomosar.binaries.ppp` now also accepts full SP3 files as input (instead of only ORBIT/CLK pairs)
+- Moved config file resource management from `tomosar.binaries.rnx2rtkp` to `tomosar.gnss.rtkp` and changed from multiple internal config files to dynamically updating the temporary config file copy by `tomosar.gnss.modify_config`
+- `tomosar.gnss.rtkp` now allows input of SP3 and CLK files or downloading of SP3 and CLK files to run in precise mode
+- `tomosar.binaries.rnx2rtkp` now allows input of SP3 and CLK files
+- `tomosar.gnss.rtkp` now handles `out_path` and output directory similarly as `tomosar.gnss.station_ppp`, and if `out_path` is `None` then `tomosar.binaries.rnx2rtkp` captures output instead of writing a `.pos` file (**Note**: This means that the counter while it is running is not visible if no `out_path` is provided, but the total Q1 percentage is still displayed after finishing)
+- Renamed `tomosar.gnss.read_pos_file` to `tomosar.gnss.read_rnx2rtkp_out` and `tomosar.gnss.read_out_file` to `tomosar.gnss.read_glab_out` and changed both to distinguish between file and stdout input by whether it is a string or a `pathlib.Path` object
+- `tomosar init` now uses precise ephemeris data in its RTKP post processing by default
+
+### Added
+- `tomosar.gnss.modify_config` (see above)
 
 ## [0.0.6] - 2025-11-06
 
