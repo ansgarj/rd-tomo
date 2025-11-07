@@ -92,14 +92,17 @@ def init(
         if dt1 < dt2:
             return dt2 - dt1 == timedelta(seconds=1)
 
-    def from_reachz(file: Path) -> tuple[tuple[Path, bool], tuple[Path, bool], tuple[float, float, float], datetime, datetime]:
+    def from_reachz(archive: Path) -> tuple[tuple[Path, bool], tuple[Path, bool], tuple[float, float, float], datetime, datetime]:
         """Extracts: base_obs, mocoref_file, base_pos, base_start and base_end from a Reach ZIP archive"""
-        header = False
-        with tmp(file.parent / "obs_file.tmp") as obs_tmp:
+        with tmp(archive.parent / "obs_file.tmp") as obs_tmp:
             ubx2rnx(drone_files["Drone GNSS file"], nav=False, sbs=False, obs_file=obs_tmp)
             obs_data, (base_obs, mocoref_file, _) = reachz2rnx(files[0], rnx_file=obs_tmp, output_dir=tmp_dir)
-        base_pos = obs_data[mocoref_file]
-        base_start, base_end, _ = obs_data[base_obs]["TIME OF FIRST OBS"], obs_data[base_obs]["TIME OF LAST OBS"], obs_data[base_obs]["APPROX POS XYZ"]
+        base_start, base_end = obs_data[base_obs]["TIME OF FIRST OBS"], obs_data[base_obs]["TIME OF LAST OBS"]
+        if header:
+            print(f"GNSS base generated from {archive}")
+        else:
+            base_pos = obs_data[mocoref_file]
+            print(f"Mocoref data and GNSS base generated from {archive}")
         return base_obs, mocoref_file, base_pos, base_start, base_end
     
     def initiate_file(source: Path, target_dir: Path) -> Path:
@@ -209,6 +212,7 @@ def init(
             ground_dir = radar_dir.parent / "ground1"
             mocoref_dir = radar_dir.parent / "mocoref"
         else:
+            mocoref_data_file = None
             if ppp:
                 if is_zip or is_mocoref or is_csv or is_json or is_llh:
                     warn("--ppp used: other mocoref options ignored")
@@ -216,7 +220,7 @@ def init(
                 header = False
             # Check if Mocoref data was found
             elif header:
-                if is_zip or is_mocoref or is_csv or is_json or is_llh:
+                if is_mocoref or is_csv or is_json or is_llh:
                     warn("--header used: other mocoref options ignored.\nReading mocoref data from RINEX header. Use only if RINEX header is known to contain precise position.")
                 else:
                     warn("Reading mocoref data from RINEX header. Use only if RINEX header is known to contain precise position.")
@@ -245,45 +249,59 @@ def init(
                 if not is_zip:
                     for key, files in mocoref_files.items():
                         if files and (mocoref_key is None or mocoref_key == key):
-                            mocoref_dir = files[0].parent
-                            base_pos, mocoref_file = generate_mocoref(files[0], type=key, generate=True, line=line, pco_offset=offset, output_dir=tmp_dir)
                             mocoref_data = True
-                            print(f"Mocoref data extracted from {key} file: {local(files[0], path)}")
-                            if not mocoref_file:
-                                # Occurs only if mocoref.moco file
-                                mocoref_file = files[0]
+                            mocoref_data_file = files[0]
 
             # Extract matching GNSS base station
             base_obs = None
             if mocoref_data:
                 for key, files in gnss_files.items():
                     if files:
+                        # Used only if processing dir
+                        ground_dir = files[0].parent
                         match key:
                             case "RINEX OBS":
                                 # Copy, don't move
                                 base_obs = files[0]
+                                print(f"GNSS base located: {base_obs}")
                             case "HCN":
                                 base_obs, _, _ = chc2rnx(files[0], obs_file=tmp_dir/files[0].with_suffix(".obs").name)
+                                print(f"GNSS base generated from {files[0]}")
                             case "RTCM3":
                                 with tmp(file.parent / "obs_file.tmp") as obs_tmp:
                                     ubx2rnx(drone_files["Drone GNSS file"], nav=False, sbs=False, obs_file=obs_tmp)
                                     tstart, tend, _, _ = extract_rnx_info(obs_tmp)
                                 base_obs, _, _ = reach2rnx(files[0], obs_file=tmp_dir/files[0].with_suffix(".obs").name, tstart=tstart, tend=tend)
+                                print(f"GNSS base generated from {files[0]}")
                             case "Reach ZIP archive":
-                                ground_dir, mocoref_dir = files[0].parent, files[0].parent
+                                # Mocoref data is extracted from the ZIP archive
+                                mocoref_data_file = None 
+                                # Used only if processing dir
+                                mocoref_dir = files[0].parent.parent / "mocoref"
+                                # Extract
                                 base_obs, mocoref_file, base_pos, base_start, base_end = from_reachz(files[0])
                         break
+                if mocoref_data_file:
+                    # Used only if processing dir
+                    mocoref_dir = files[0].parent
+                    # Get mocoref data and generate mocoref.moco file if necessary
+                    base_pos, mocoref_file = generate_mocoref(files[0], type=key, generate=True, line=line, pco_offset=offset, output_dir=tmp_dir)
+                    mocoref_data = True
+                    print(f"Mocoref data extracted from {key} file: {local(files[0], path)}")
+                    if not mocoref_file:
+                        # Occurs only if mocoref.moco file
+                        mocoref_file = files[0]
             else:
                 # Only Reach ZIP archive provides mocoref data
                 if gnss_files["Reach ZIP archive"]:
-                    ground_dir, mocoref_dir = files[0].parent, files[0].parent
+                    # Used only if processing dir 
+                    ground_dir, mocoref_dir = files[0].parent, files[0].parent.parent / "mocoref"
+                    # Extract
                     base_obs, mocoref_file, base_pos, base_start, base_end = from_reachz(files[0])
                 else:
                     raise FileNotFoundError(f"Could not find mocoref data.")
 
-            if base_obs:
-                print(f"GNSS base: {base_obs[0]}")
-            else:
+            if not base_obs:
                 raise FileNotFoundError(f"Could not find GNSS base.")
             
             settings = Settings()
