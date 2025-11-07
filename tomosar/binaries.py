@@ -989,7 +989,7 @@ def _parse_atx(file_path, antenna_type, radome, mode: str = "glab") -> tuple[lis
 def ppp(
         obs_file: str|Path,
         sp3_file: str|Path,
-        clk_file: str|Path,
+        clk_file: str|Path|None = None,
         out_path: str|Path|None = None,
         navglo_file: str|Path = None,
         atx_file: str|Path = None,
@@ -1010,13 +1010,20 @@ def ppp(
                 'glab',
                     '-input:obs', obs_file,
                     '-input:ant', atx,
-                    '-input:orb', sp3_file,
-                    '-input:clk', clk_file,
                     '--summary:waitfordaystart',
                     '-summary:formalerrorver', '0.0013',
                     '-summary:formalerror3d', '0.002',
                     '-summary:formalerrorhor', '0.0013'
             ]
+            if sp3_file and clk_file:
+                cmd.extend([
+                    '-input:orb', sp3_file,
+                    '-input:clk', clk_file,
+                ])
+            elif sp3_file:
+                cmd.extend(['-input:sp3', sp3_file])
+            else:
+                raise FileNotFoundError("No SP3 file was provided")
             if elevation_mask:
                 cmd.extend(['-pre:elevation', elevation_mask])
             freqs, unavailable, fallback = _parse_atx(receiver_file, antenna_type=antenna_type, radome=radome, mode="glab")
