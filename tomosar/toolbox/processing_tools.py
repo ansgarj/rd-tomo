@@ -11,7 +11,7 @@ from ..trackfinding import trackfinder as run_trackfinder
 from .. import ImageInfo, TomoScenes, Settings
 from ..utils import interactive_console, extract_datetime, local, warn, drop_into_terminal, generate_mocoref
 from ..forging import tomoforge
-from ..binaries import chc2rnx, reach2rnx, ubx2rnx, tmp
+from ..binaries import chc2rnx, reach2rnx, ubx2rnx, tmp, merge_eph
 from ..transformers import ecef_to_geo
 
 @click.command()
@@ -183,10 +183,11 @@ def init(
                         match = regex.match(p.name)
                         if match:
                             mocoref_files[key].append(p)
-        for key, regex in sp3_patterns.items():
-            match = regex.match(p.name)
-            if match:
-                sp3_files[key].append(p)
+            if not use_broadcast:
+                for key, regex in sp3_patterns.items():
+                    match = regex.match(p.name)
+                    if match:
+                        sp3_files[key].append(p)
 
     # Ensure that exactly one file is found for each drone type with matching datetimes and extract nominal datetime
     dt = None
@@ -216,10 +217,15 @@ def init(
     for key, file in drone_files.items():
         print(f"{" " * 2}- {key}: {local(file, path)}")
 
-    # Work on base OBS and mocoref.moco
-    with tmp("tmp", allow_dir=True) as tmp_dir:
+    # Work on SP3 files
+    if sp3_files["SP3"]:
+        sp3_file, clk_file = merge_eph(sp3_files["SP3"].extend(sp3_files["CLK"]))
+    else:
         sp3_file = None
         clk_file = None
+
+    # Work on base OBS and mocoref.moco
+    with tmp("tmp", allow_dir=True) as tmp_dir:
         if swepos:
             if is_zip or is_mocoref or is_csv or is_json or is_llh:
                 warn("--swepos used: other mocoref options ignored")
