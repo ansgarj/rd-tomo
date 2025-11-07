@@ -261,7 +261,7 @@ def tmp(*args, temporary: bool = True, allow_dir: bool = False) -> Iterator[Path
         if not allow_dir and path.is_dir():
             raise ValueError("To allow directories to be made temporary, specify allow_dir=True.")
         if allow_dir and not path.exists():
-            path.mkdir(parents=True, exist_ok=True)
+            path.mkdir(parents=False, exist_ok=True)
     try:
         yield paths[0] if len(paths) == 1 else paths
     finally:

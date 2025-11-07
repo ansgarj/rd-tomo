@@ -2,12 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
 ## [0.0.6] - 2025-11-06
 
 ### Added
 - `tomosar test station-ppp` which runs `station-ppp` and compares against ground truth as found in a mocoref data file, can also be run directly on Reach ZIP archives without unpacking them (does not require separate mocoref data)
 - `tomosar.chc2rnx` for converting CHCI83 .HCN file to RINEX in case RINEX files are missing for some reason
-- `tomosar.binaries.tmp` context manager that makes an existing file or directory temporary (the latter including ALL content) or creates a temporary directory, and changed existing functions that downloaded files that were supposed to be temporary to use it
+- `tomosar.binaries.tmp` context manager that makes a path temporary (including ALL content for directories), and changed existing functions that downloaded files that were supposed to be temporary to use it
 - `tomosar.gnss.reachz2rnx` and `tomosar extract-reach` that extracts RINEX OBS, `mocoref.moco` and optionally RINEX NAV files from a Reach ZIP archive
 - `tomosar init` to collect files in a data directory and convert to the correct structure for processing, and copying or moving files into a processing directory in such a manner that the data directory is unaltered. Then initiate preprocessing in the processing directory. \[NOT IMPLEMENTED\]: IMU and IMU+GNSS integration and what follows.
 - `tomosar.gnss.rtkp` which calls `tomosar.binaries.rnx2rtkp` and reads the `.pos` file
