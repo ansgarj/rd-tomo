@@ -5,6 +5,7 @@ import time as Time
 from datetime import datetime, timedelta, date
 import re
 import shutil
+from matplotlib import pyplot as plt
 
 from ..gnss import fetch_swepos as run_fetch_swepos, station_ppp as run_station_ppp, rtkp, extract_rnx_info, reachz2rnx
 from ..trackfinding import trackfinder as run_trackfinder
@@ -16,7 +17,7 @@ from ..transformers import ecef_to_geo
 
 @click.command()
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path), default=Path.cwd())
-@click.option("-f", "--force", is_flag=True, help="Force generation of processing directory (this may overwrite existing directories, bit has no effect if PATH is a processing directory)")
+@click.option("-f", "--force", is_flag=True, help="Force generation of processing directory (this may overwrite existing directories, but has no effect if PATH is a processing directory)")
 @click.option("--swepos", is_flag=True, help="Substitute for GNSS base station with files from nearest Swepos station")
 @click.option("--ppp", is_flag=True, help="Subsitute for mocoref data by running static PPP on GNSS base station")
 @click.option("-z", "-zip", "is_zip", is_flag=True, help="Force GNSS base station and mocoref.moco files to be generated from a Reach ZIP archive")
@@ -26,7 +27,7 @@ from ..transformers import ecef_to_geo
 @click.option("--llh", "is_llh", is_flag=True, help="Force mocoref data to be read from LLH file")
 @click.option("-h", "--header", is_flag=True, help="Read mocoref data from RINEX header (no separate file, use ONLY if RINEX header is known to contain precise position)")
 @click.option("-p", "--processing", "is_processing_dir", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
-@click.option("-b", "--broadcast", "use_broadcast", is_flag=True, help="Do not use precise ephemeris data")
+@click.option("--precise", "use_precise", is_flag=True, help="Attempt to use precise ephemeris data (note: this may degrade solution due to sparse ephemeris data)")
 @click.option("-t", "--tag", default = "", flag_value=date.today().strftime('%Y%m%d'), help="Tag processing directory with specified string (default: the date of today)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 @click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
@@ -48,7 +49,7 @@ def init(
     is_llh: bool,
     header: bool,
     is_processing_dir: bool,
-    use_broadcast: bool,
+    use_precise: bool,
     tag: str,
     config: Path | None,
     atx: Path | None,
@@ -110,6 +111,8 @@ def init(
         return base_obs, mocoref_file, base_pos, base_start, base_end
     
     def initiate_file(source: Path, target_dir: Path) -> Path:
+        if source == target_dir / source.name:
+            return source
         if tmp_dir in source.parents:
             return Path(shutil.move(source, target_dir))
         else:
@@ -183,7 +186,7 @@ def init(
                         match = regex.match(p.name)
                         if match:
                             mocoref_files[key].append(p)
-            if not use_broadcast:
+            if use_precise:
                 for key, regex in sp3_patterns.items():
                     match = regex.match(p.name)
                     if match:
@@ -273,6 +276,7 @@ def init(
                         if files and (mocoref_key is None or mocoref_key == key):
                             mocoref_data = True
                             mocoref_data_file = files[0]
+                            mocoref_key = key
 
             # Extract matching GNSS base station
             base_obs = None
@@ -305,14 +309,14 @@ def init(
                         break
                 if mocoref_data_file:
                     # Used only if processing dir
-                    mocoref_dir = files[0].parent
+                    mocoref_dir = mocoref_data_file.parent
                     # Get mocoref data and generate mocoref.moco file if necessary
-                    base_pos, mocoref_file = generate_mocoref(files[0], type=key, generate=True, line=line, pco_offset=offset, output_dir=tmp_dir)
+                    base_pos, mocoref_file = generate_mocoref(mocoref_data_file, type=mocoref_key, generate=True, line=line, pco_offset=offset, output_dir=tmp_dir)
                     mocoref_data = True
-                    print(f"Mocoref data extracted from {key} file: {local(files[0], path)}")
+                    print(f"Mocoref data extracted from {key} file: {local(mocoref_data_file, path)}")
                     if not mocoref_file:
                         # Occurs only if mocoref.moco file
-                        mocoref_file = files[0]
+                        mocoref_file = mocoref_data_file
             else:
                 # Only Reach ZIP archive provides mocoref data
                 if gnss_files["Reach ZIP archive"]:
@@ -411,19 +415,34 @@ def init(
     rover_obs, rover_nav, rover_sbs = ubx2rnx(drone_files["Drone GNSS file"])
     if swepos and not elevation_mask:
         elevation_mask = 5
-    rtkp(
+    coords, gpst, q = rtkp(
         rover_obs=rover_obs,
         base_obs=base_obs,
         nav_file=rover_nav,
         sbs_file=rover_sbs,
         sp3_file=sp3_file,
         clk_file=clk_file,
-        precise=not use_broadcast,
+        precise=use_precise,
         out_path=rover_obs.with_suffix(".pos"),
         config_file=config,
         elevation_mask=elevation_mask,
         mocoref_file=mocoref_file,
     )
+
+    fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8))
+    axs = axs.flatten()
+    ax = axs[0]
+    ax.plot(gpst[q==1], coords[:,2][q==1], 'g+')
+    ax.plot(gpst[q!=1], coords[:,2][q!=1], 'r+')
+    ax.set_xlabel("GPST (s)")
+    ax.set_ylabel("Ellipsoidal Height (m)")
+    ax = axs[1]
+    ax.plot(coords[:,1][q==1], coords[:,0][q==1], 'g+')
+    ax.plot(coords[:,1][q!=1], coords[:,0][q!=1], 'r+')
+    ax.set_xlabel("Longitude (deg)")
+    ax.set_ylabel("Latitude (deg)")
+    fig_name = 
+
 
     # Continue with IMU and unimoco ... 
 

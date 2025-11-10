@@ -801,37 +801,17 @@ def rnx2rtkp(
         elevation_mask: float|None = None,
         mocoref_file: str|Path|None = None,
         mocoref_type: str|None = None,
-        mocoref_line: int = 1
+        mocoref_line: int = 1,
+        antenna_type: str = None,
+        radome: str = "NONE",
+        constellations: list[str]|None = None,
+        freqs: str = ""
 ) -> str:
     """Runs RTKLIB's rnx2rtkp with dynamic command construction based on available resources."""
-    antenna_type, radome = _ant_type(base_obs)
-    print(f"Detected base antenna type: {antenna_type} {radome}")
-    with resource(None, "SATELLITES") as atx:
-        with resource(None, "RECEIVER", antenna=antenna_type, radome=radome) as receiver:
-            if receiver is None:
-                receiver_file = atx
-            else:
-                receiver_file = receiver
-            
-            constellations, freqs, fallback = _parse_atx(receiver_file, antenna_type=antenna_type, radome=radome, mode="rnx2rtkp")
-            if fallback:
-                print("Defaulted to NONE radome")
-            if constellations:
-                print(f"Avaialable constellations: {','.join(constellations)}")
-                match freqs:
-                    case '1':
-                        print("Available frequencies: L1")
-                    case '2':
-                        print("Available frequencies: L1+L2")
-                    case '3':
-                        print("Available frequencies: L1+L2+L5")
-            else:
-                print("No callibration data available. Using all constellations and frequencies.")
-
     cmd = ['rnx2rtkp']
     if out_path:
         capture = False
-        ['-o', out_path]
+        cmd.extend(['-o', out_path])
     else:
         capture = True
     if config_file:
@@ -844,8 +824,8 @@ def rnx2rtkp(
         (mocoref_latitude, mocoref_longitude, mocoref_height), _ = generate_mocoref(mocoref_file, type=mocoref_type, line=mocoref_line, generate=False)
         cmd.extend(["-l", mocoref_latitude, mocoref_longitude, mocoref_height])
     with resource(base_obs) as tmp_obs:
-        if fallback:
-            _update_antenna(tmp_obs, antenna=antenna_type, radome='NONE')
+        if antenna_type:
+            _update_antenna(tmp_obs, antenna=antenna_type, radome=radome)
         cmd.extend([rover_obs, tmp_obs, nav_file])
         if sbs_file:
             cmd.append(sbs_file)

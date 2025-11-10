@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `tomosar.gnss.modify_config` (see below)
+
 ### Changed
 - `tomosar.binaries.tmp` no longer creates parents to temporary directories (which were not temporary), but fails if all parents do not exist
 - `tomosar.gnss.station_ppp` now allows input of SP3 and/or CLK files instead of always downloading, and accepts full SP3 files as input; it also returns the SP3 and CLK paths if retain is used (but not rotation matrix and distance). The output directory for the files can also be specified without specifying a path for `.out` file by inputing a directory as `out_path`. 
@@ -15,8 +18,9 @@ All notable changes to this project will be documented in this file.
 - Renamed `tomosar.gnss.read_pos_file` to `tomosar.gnss.read_rnx2rtkp_out` and `tomosar.gnss.read_out_file` to `tomosar.gnss.read_glab_out` and changed both to distinguish between file and stdout input by whether it is a string or a `pathlib.Path` object
 - `tomosar init` now uses precise ephemeris data in its RTKP post processing by default
 
-### Added
-- `tomosar.gnss.modify_config` (see above)
+### Fixed
+- Fixed bug in `tomosar --version` that caused it to sometimes display the previous version
+- Fixed a fatal bug in `tomosar init` caused by a mixing up of the GNSS base and the `mocoref.moco` after the last update
 
 ## [0.0.6] - 2025-11-06
 

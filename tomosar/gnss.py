@@ -14,7 +14,7 @@ import zipfile
 import shutil
 
 from .utils import prompt_ftp_login, gunzip, ecef2enu, warn, generate_mocoref
-from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, reach2rnx, rnx2rtkp, ppp, resource, local, tmp
+from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, reach2rnx, rnx2rtkp, ppp, resource, local, tmp, _ant_type, _parse_atx
 from .config import Settings
 from .transformers import ecef_to_geo
 
@@ -293,10 +293,10 @@ def fetch_sp3_clk(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Ensure start time is at least 6 hours before start
-    start_time = start_time - timedelta(hours=6)
+    start_time = start_time #- timedelta(hours=6)
     start_time = start_time.date()
     # Ensure end time is at least 6 hours after end
-    end_time = end_time + timedelta(hours=6)
+    end_time = end_time #+ timedelta(hours=6)
     end_time = end_time.date()
 
     # Collect files to download
@@ -400,8 +400,9 @@ def read_rnx2rtkp_out(input: str|Path) -> tuple[np.ndarray, float, np.ndarray]:
     """Parses a rnx2rtkp .pos file.
     Returns:
         array with the coordinates,
-        float with the percentage of Q1,
-        array with the GPST corresponding to the coordinates"""
+        array with the GPST corresponding to the coordinates,
+        array with the quality conversion corresponding to the coordinates (Q),
+        """
     
     if isinstance(input, str):
         lines = input.splitlines()
@@ -425,11 +426,10 @@ def read_rnx2rtkp_out(input: str|Path) -> tuple[np.ndarray, float, np.ndarray]:
         coords = data[:, 2:5]
         gpst = data[:, 1]
         q = data[:, 5]
-        q = np.sum(q == 1) / len(q) * 100
     else:
         raise ValueError(f"Unexpected format in {input}: not enough columns")
     
-    return coords, q, gpst
+    return coords, gpst, q
 
 def read_glab_out(input: str|Path, verbose: bool = False) -> tuple[np.ndarray,
                                                                        np.ndarray,
@@ -559,12 +559,12 @@ def modify_config(config_path: Path, standard: bool = False, precise: bool = Fal
         # Flag to check if the required field is found
         sateph_found = False
 
-        # Modify the relevant lines
+    # Modify the relevant lines
     for i, line in enumerate(lines):
         if precise:
             # Modify required field if found
             if line.strip().startswith('pos1-sateph'):
-                lines[i] = 'pos1-sateph =1\n'
+                lines[i] = 'pos1-sateph        =1\n'
                 sateph_found = True
         if standard:
             # Remove explorer specific fields
@@ -625,14 +625,38 @@ def rtkp(
     else:
         output_dir = rover_obs.parent
 
-    print(f"Running RTKP post processing ...\n  Rover: {local(rover_obs)}\n  Base: {local(base_obs)}\n  Nav: {local(nav_file)}\n", flush=True)
-    with resource(config_file, "RTKP_CONFIG") as config:
-        if sp3_file or precise:
-            # Modify to precise pos1-eph mode
-            modify_config(config, precise=True)
-            if not sp3_file:
-                start_utc, end_utc, _, _ = extract_rnx_info(base_obs)
-                with tmp(out_path.parent / "tmp", allow_dir=True) as tmp_dir:
+    antenna_type, radome = _ant_type(base_obs)
+    print(f"Detected base antenna type: {antenna_type} {radome}")
+    with resource(None, "SATELLITES") as atx:
+        with resource(None, "RECEIVER", antenna=antenna_type, radome=radome) as receiver:
+            if receiver is None:
+                receiver_file = atx
+            else:
+                receiver_file = receiver
+            
+            constellations, freqs, fallback = _parse_atx(receiver_file, antenna_type=antenna_type, radome=radome, mode="rnx2rtkp")
+            if fallback:
+                print("Defaulted to NONE radome")
+            if constellations:
+                print(f"Avaialable constellations: {','.join(constellations)}")
+                match freqs:
+                    case '1':
+                        print("Available frequencies: L1")
+                    case '2':
+                        print("Available frequencies: L1+L2")
+                    case '3':
+                        print("Available frequencies: L1+L2+L5")
+            else:
+                print("No callibration data available. Using all constellations and frequencies.")
+    
+    print(f"Running RTKP post processing ...\n  Rover: {local(rover_obs)}\n  Base: {local(base_obs)}\n  Nav: {local(nav_file)}\n-->Out: {local(out_path)}", flush=True)
+    with resource(config_file, "RTKP_CONFIG", antenna=antenna_type, radome=radome) as config:
+        with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
+            if sp3_file or precise:
+                # Modify to precise pos1-eph mode
+                modify_config(config, precise=True)
+                if not sp3_file:
+                    start_utc, end_utc, _, _ = extract_rnx_info(base_obs)
                     if not sp3_file:
                         failed = fetch_sp3_clk(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, max_workers=max_downloads, max_retries=max_retries, dry=dry)
                         if failed:
@@ -641,42 +665,46 @@ def rtkp(
                         sp3_file, clk_file = merge_ephemeris(tmp_dir)
                         if retain:
                             # Move files out of temporary directory
-                            sp3_file = shutil.move(sp3_file, out_path.parent)
-                            clk_file = shutil.move(clk_file, out_path.parent)
-        if dry:
-            return
-        try:
-            out = rnx2rtkp(
-                rover_obs=rover_obs,
-                base_obs=base_obs,
-                nav_file=nav_file,
-                out_path=out_path,
-                config_file=config,
-                sbs_file=sbs_file,
-                sp3_file=sp3_file,
-                clk_file=clk_file,
-                elevation_mask=elevation_mask,
-                mocoref_file=mocoref_file,
-                mocoref_type=mocoref_type,
-                mocoref_line=mocoref_line
-            )
-        except RuntimeError:
-            # Try without Explorer specific options
-            modify_config(config, standard=True)
-            out = rnx2rtkp(
-                rover_obs=rover_obs,
-                base_obs=base_obs,
-                nav_file=nav_file,
-                out_path=out_path,
-                config_file=config,
-                sbs_file=sbs_file,
-                sp3_file=sp3_file,
-                clk_file=clk_file,
-                elevation_mask=elevation_mask,
-                mocoref_file=mocoref_file,
-                mocoref_type=mocoref_type,
-                mocoref_line=mocoref_line
-            )
+                            sp3_file = shutil.move(sp3_file, output_dir)
+                            clk_file = shutil.move(clk_file, output_dir)
+            if dry:
+                return
+            try:
+                out = rnx2rtkp(
+                    rover_obs=rover_obs,
+                    base_obs=base_obs,
+                    nav_file=nav_file,
+                    out_path=out_path,
+                    config_file=config,
+                    sbs_file=sbs_file,
+                    sp3_file=sp3_file,
+                    clk_file=clk_file,
+                    elevation_mask=elevation_mask,
+                    mocoref_file=mocoref_file,
+                    mocoref_type=mocoref_type,
+                    mocoref_line=mocoref_line,
+                    constellations=constellations,
+                    freqs=freqs,
+                    antenna_type=antenna_type,
+                    radome=radome
+                )
+            except RuntimeError:
+                # Try without Explorer specific options
+                modify_config(config, standard=True)
+                out = rnx2rtkp(
+                    rover_obs=rover_obs,
+                    base_obs=base_obs,
+                    nav_file=nav_file,
+                    out_path=out_path,
+                    config_file=config,
+                    sbs_file=sbs_file,
+                    sp3_file=sp3_file,
+                    clk_file=clk_file,
+                    elevation_mask=elevation_mask,
+                    mocoref_file=mocoref_file,
+                    mocoref_type=mocoref_type,
+                    mocoref_line=mocoref_line
+                )
 
     if out_path:
         if out_path.is_file():
@@ -684,8 +712,14 @@ def rtkp(
         else:
             raise FileNotFoundError(f"Could not find generated .pos file: {out_path}")
 
-    coords, q, gpst = read_rnx2rtkp_out(out)
-    print(f"Quality conversion: Q1 = {q:.2f} %")
+    coords, gpst, q = read_rnx2rtkp_out(out)
+    quality_conversion = np.sum(q == 1) / len(q) * 100
+    print(f"Quality conversion: Q1 = {quality_conversion:.2f} %")
+    return coords, gpst, q
+    
+
+
+
 
 def detect_convergence_and_mean(x_vals, y_vals, z_vals, x_err, y_err, z_err, err, window_size=100, threshold_percentile=10, verbose: bool = False):
     # Residuals from full-series mean

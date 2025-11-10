@@ -24,7 +24,7 @@ def tomosar(ctx: click.Context, version: bool) -> None:
             hatch_version = subprocess.check_output(["hatch", "version"]).decode().strip()
             if hatch_version != __version__:
                 update_version_file(hatch_version)
-            click.echo(f"TomoSAR version: {__version__}")
+            click.echo(f"TomoSAR version: {hatch_version}")
         except subprocess.CalledProcessError:
             click.echo("Error retrieving version", err=True)
         ctx.exit()
