@@ -27,7 +27,7 @@ from ..transformers import ecef_to_geo
 @click.option("--llh", "is_llh", is_flag=True, help="Force mocoref data to be read from LLH file")
 @click.option("-h", "--header", is_flag=True, help="Read mocoref data from RINEX header (no separate file, use ONLY if RINEX header is known to contain precise position)")
 @click.option("-p", "--processing", "is_processing_dir", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
-@click.option("--precise", "use_precise", is_flag=True, help="Attempt to use precise ephemeris data (note: this may degrade solution due to sparse ephemeris data)")
+@click.option("--precise", "use_precise", is_flag=True, help="Attempt to use precise ephemeris data (NOTE: this may degrade solution, run tomosar test precise-rktp to test)")
 @click.option("-t", "--tag", default = "", flag_value=date.today().strftime('%Y%m%d'), help="Tag processing directory with specified string (default: the date of today)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 @click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
@@ -110,13 +110,22 @@ def init(
             print(f"Mocoref data and GNSS base generated from {archive}")
         return base_obs, mocoref_file, base_pos, base_start, base_end
     
-    def initiate_file(source: Path, target_dir: Path) -> Path:
-        if source == target_dir / source.name:
-            return source
-        if tmp_dir in source.parents:
-            return Path(shutil.move(source, target_dir))
+    def initiate_file(source: Path|tuple[Path, ...], target_dir: Path) -> Path:
+        if isinstance(source, Path):
+            source=(source,)
+        target = []
+        for file in source:
+            if file == target_dir / file.name:
+                target.append(file)
+                continue
+            target.append(Path(shutil.copy2(file, target_dir)))
+            if tmp_dir in file.parents:
+                file.unlink()
+        if len(target) == 1:
+            return target[0]
         else:
-            return Path(shutil.copy2(source, target_dir))
+            return tuple(target)
+
 
     if swepos and ppp:
         warn("Both --swepos and --ppp cannot be used, ignoring -ppp.")
@@ -220,15 +229,24 @@ def init(
     for key, file in drone_files.items():
         print(f"{" " * 2}- {key}: {local(file, path)}")
 
-    # Work on SP3 files
-    if sp3_files["SP3"]:
-        sp3_file, clk_file = merge_eph(sp3_files["SP3"].extend(sp3_files["CLK"]))
-    else:
-        sp3_file = None
-        clk_file = None
-
-    # Work on base OBS and mocoref.moco
     with tmp("tmp", allow_dir=True) as tmp_dir:
+        # Work on SP3 files
+        if sp3_files["SP3"]:
+            eph_files = sp3_files["SP3"]
+            eph_files.extend(sp3_files["CLK"])
+            sp3_file, clk_file = merge_eph(eph_files, output_dir=tmp_dir)
+            if sp3_file and tmp_dir not in sp3_file.parents:
+                print(f"Located SP3 file: {sp3_file}")
+            if clk_file and tmp_dir not in clk_file.parents:
+                print(f"Located CLK file: {clk_file}")
+        else:
+            sp3_file = None
+            clk_file = None
+        
+        # Convert drone GNSS to RINEX
+        rover_obs, rover_nav, rover_sbs = ubx2rnx(drone_files["Drone GNSS file"], obs_file=tmp_dir / drone_files["Drone GNSS file"].with_suffix(".obs").name)
+        
+        # Work on base OBS and mocoref.moco
         if swepos:
             if is_zip or is_mocoref or is_csv or is_json or is_llh:
                 warn("--swepos used: other mocoref options ignored")
@@ -396,6 +414,9 @@ def init(
             for key, file in drone_files.items():
                 drone_files[key] = shutil.copy2(file, radar_dir)
         
+        # Initiate drone RINEX files
+        rover_obs, rover_nav, rover_sbs = initiate_file((rover_obs, rover_nav, rover_sbs), radar_dir)
+        
         # Initiate base_obs and mocoref_file
         base_obs = initiate_file(base_obs, ground_dir)
         mocoref_file = initiate_file(mocoref_file, mocoref_dir)
@@ -408,13 +429,15 @@ def init(
         # Move into processing dir
         os.chdir(processing_dir)
 
-    print("All files located, dropping you into the processing directory ... ")
+    print("All files located, dropping you into the processing directory ... ", end="\n\n")
     drop_into_terminal(processing_dir)
     
     # Initiate preprocessing
-    rover_obs, rover_nav, rover_sbs = ubx2rnx(drone_files["Drone GNSS file"])
     if swepos and not elevation_mask:
-        elevation_mask = 5
+        if use_precise or sp3_file:
+            elevation_mask = 20
+        else:
+            elevation_mask = 5
     coords, gpst, q = rtkp(
         rover_obs=rover_obs,
         base_obs=base_obs,
@@ -427,6 +450,7 @@ def init(
         config_file=config,
         elevation_mask=elevation_mask,
         mocoref_file=mocoref_file,
+        retain=True
     )
 
     fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8))
@@ -441,8 +465,8 @@ def init(
     ax.plot(coords[:,1][q!=1], coords[:,0][q!=1], 'r+')
     ax.set_xlabel("Longitude (deg)")
     ax.set_ylabel("Latitude (deg)")
-    fig_name = 
-
+    fig_name = dt.strftime("%Y-%m-%d-%H-%M-%S-position.pdf")
+    fig.savefig(radar_dir / fig_name, format="pdf")
 
     # Continue with IMU and unimoco ... 
 

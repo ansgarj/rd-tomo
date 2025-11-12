@@ -8,9 +8,11 @@ import matplotlib
 import csv
 import struct
 import numpy as np
+from tqdm import tqdm
 
-from ..gnss import extract_rnx_info, read_glab_out, read_rnx2rtkp_out
-from ..binaries import rnx2rtkp, resource
+from ..gnss import extract_rnx_info, read_glab_out, rtkp
+from ..utils import ecef2enu
+from ..transformers import geo_to_ecef
 from ..config import PACKAGE_PATH
 from .setup_tools import install_changed
 
@@ -180,91 +182,60 @@ def inspect_out(file: Path) -> None:
         plt.legend()
     plt.show()
 
-def plot_coordinates(coords1, coords2, labels, title1, title2):
-    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-
-    for i in range(3):
-        axes[i].plot(coords1[:, i], label=title1, alpha=0.7)
-        axes[i].plot(coords2[:, i], label=title2, alpha=0.7)
-        axes[i].set_ylabel(labels[i])
-        axes[i].legend()
-        axes[i].grid(True)
-
-    axes[-1].set_xlabel('Epoch Index')
-    plt.tight_layout()
-    plt.show()
-
-def plot_difference(t1, coords1, t2, coords2, labels):
-    common_times = np.intersect1d(t1, t2)
-
-    # Get indices in t1 and t2 where these common times occur
-    indices_t1 = np.nonzero(np.isin(t1, common_times))[0]
-    indices_t2 = np.nonzero(np.isin(t2, common_times))[0]
-    diff = coords1[indices_t1] - coords2[indices_t2]
-    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-    for i in range(3):
-        axes[i].plot(diff[:, i], color='purple', label=f'Difference ({labels[i]})')
-        axes[i].set_ylabel(f'Δ {labels[i]}')
-        axes[i].legend()
-        axes[i].grid(True)
-    axes[-1].set_xlabel('Epoch Index')
-    diff_mean = diff.mean(axis=0)
-    diff_std = diff.std(axis=0)
-    print(f"Mean difference: X={diff_mean[0]:.2g} m ({diff_std[0]:.2g} m), Y={diff_mean[1]:.2g} m ({diff_std[1]:.2g} m), Z={diff_mean[2]:.2g} m ({diff_std[2]:.2g} m)")
-    plt.tight_layout()
-    plt.show()
-
 @dev.command()
-@click.argument("rover_obs", type=click.Path(exists=True, path_type=Path))
-@click.argument("base1_obs", type=click.Path(exists=True, path_type=Path))
-@click.argument("base2_obs", type=click.Path(exists=True, path_type=Path))
-@click.argument("nav_path", type=click.Path(exists=True, path_type=Path))
+@click.argument("rover_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
+@click.argument("nav_path", type=click.Path(exists=True, path_type=Path, dir_okay=False))
+@click.argument("base_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
+@click.option("--sp3", "sp3_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to SP3 file (if not specifed: download)", default=None)
+@click.option("--clk", "clk_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to CLK file to complement SP3 file if needed", default=None)
 @click.option("-k", "--config", 'conf_path', help="Path to config file", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("-s", "--sbas", 'sbs_path', help="Path to SBAS corrections file", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("-m", "--mocoref", 'mocoref_path', help="Path to mocoref file for first base", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("-f", "--force", is_flag=True, help="Force reprocessing")
-def compare_rtkp(rover_obs, base1_obs, base2_obs, nav_path, conf_path, sbs_path, mocoref_path, force) -> None:
-    """Compare .pos files from two rnx2rtkp calls"""
+@click.option("--mocoref", 'mocoref_path', help="Path to mocoref file for first base", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("-m", "--mask", "elevation_mask", type=float, help="Specify elevation mask")
+def compare_rtkp(rover_obs, base_obs, nav_path, sp3_path, clk_path, conf_path, sbs_path, mocoref_path, elevation_mask) -> None:
+    """Compare solutions from precise and broadcast ephemeris solutions"""
 
-    pos1_path =  base1_obs.with_suffix(".pos")
-    pos2_path = base2_obs.with_suffix(".pos")
     # Run base 1
-    with resource(conf_path, "RTKP_CONFIG") as config:
-        rnx2rtkp(
-            rover_obs=rover_obs,
-            base_obs=base1_obs,
-            nav_file=nav_path,
-            config=conf_path,
-            out_path=pos1_path,
-            mocoref_file=mocoref_path,
-            sbs_file=sbs_path
-        )
-    # Read results
-    coords1, q1, t1 = read_rnx2rtkp_out(pos1_path)
-    # Display Q=1 percentage
-    print(f"{pos1_path} Q1: {q1} %")
+    print("PRECISE:")
+    coords_precise, gpst, q_precise= rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask, precise=True, sp3_file=sp3_path, clk_file=clk_path)
 
     # Run base 2
-    with resource(conf_path, "RTKP_CONFIG") as config:
-        rnx2rtkp(
-            rover_obs=rover_obs,
-            base_obs=base2_obs,
-            nav_file=nav_path,
-            config=config,
-            out_path=pos1_path,
-            mocoref_file=None,
-            sbs_file=sbs_path
-        )
-    # Read results
-    coords2, q2, t2 = read_rnx2rtkp_out(pos2_path)
-    # Display Q=1 percentage
-    print(f"{pos2_path} Q1: {q2} %")
+    print("BROADCAST:")
+    coords_bc, _, q_bc = rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask)
 
-    labels = ['East/X', 'North/Y', 'Up/Z']
+    fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8), sharex=True, tight_layout=True)
+    axs = axs.flatten()
+    ax = axs[0]
+    precise_only = (q_precise != 1) & (q_bc == 1)
+    bc_only = (q_bc != 1) & (q_precise == 1)
+    both =( q_precise != 1) &( q_bc != 1)
+    #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
+    ax.plot(gpst, coords_bc[:,2], 'g-', label=f"Broadcast track")
+    ax.plot(gpst[precise_only], coords_precise[:,2][precise_only], 'r+', label=f"Precise only float")
+    ax.plot(gpst[bc_only], coords_bc[:,2][bc_only], 'm+', label=f"Broadcast only float")
+    ax.plot(gpst[both], coords_bc[:,2][both], 'y+', label=f"Both float")
+    ax.set_ylabel("Ellipsoidal Height (m)")
+    ax.legend()
+    ax = axs[1]
 
-    #plot_coordinates(coords1, coords2, labels, pos1, pos2)
+    diff = np.vstack([
+        ecef2enu(coords_precise[n, 0], coords_precise[n, 1]) @ 
+            (np.asarray(geo_to_ecef.transform(*coords_bc[n, :])) - np.asarray(geo_to_ecef.transform(*coords_precise[n, :])))
+            for n in range(len(gpst))
+    ])
 
-    plot_difference(t1, coords1, t2, coords2, labels)
+    dist = np.sqrt((diff**2).sum(axis=1))
+
+    ax.plot(gpst, dist, label="Distance (m)")
+    #ax.plot(gpst, diff[:,0], label="Latitude (deg)")
+    #ax.plot(gpst, diff[:,1], label="Longitude (deg)")
+    #ax.plot(gpst, diff[:,2], label="Height (m)")
+    ax.set_ylabel("Coordinate difference (m)")
+
+    fig.supxlabel("GPST (s)")
+
+    plt.show()
+
 
 @dev.command()
 def update_install() -> None:

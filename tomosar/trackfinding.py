@@ -311,7 +311,7 @@ def analyze_tracks(tracks, flight_info, base_ele, dem_path, npar: int = os.cpu_c
     
     return spiral_tracks, linear_tracks
 
-def _analyze(tagged_track, flight_info, base_ele, dem_path, counters, lock):
+def _analyze(tagged_track, flight_info, base_ele, dem_path, counters, lock) -> tuple[str, int, pd.DataFrame, dict]:
     tag = tagged_track[0]
     track = tagged_track[2]
     with lock:
@@ -322,11 +322,11 @@ def _analyze(tagged_track, flight_info, base_ele, dem_path, counters, lock):
         track, updated_info = analyze_spiral(track, track_info, base_ele, dem_path)
     if tag == 'Linear':
         track_info = flight_info[f'Linear_{i}']
-        track, updated_info = analyze_linear(track, track_info, base_ele)
+        updated_info = analyze_linear(track, track_info, base_ele)
     return (tag, i, track, updated_info)
 
 ## Analyze spirals
-def analyze_spiral(track, track_info, base_ele, dem_path):
+def analyze_spiral(track: pd.DataFrame, track_info: dict, base_ele: float, dem_path: Path) -> tuple[pd.DataFrame, dict]:
     # Correct time stamps
     track_info['t_start'] = format_duration(track['% GPST (s)'].iloc[0])
     track_info['t_end'] = format_duration(track['% GPST (s)'].iloc[-1])
@@ -352,7 +352,7 @@ def analyze_spiral(track, track_info, base_ele, dem_path):
     return track, track_info
 
 ## Analyze linear tracks
-def analyze_linear(tracks, tracks_info, base_ele):
+def analyze_linear(tracks: list[pd.DataFrame], tracks_info: dict, base_ele: float) -> dict:
     for i, track in enumerate(tracks):
         track_info = tracks_info[i+1]
         # Correct time stamps
@@ -380,7 +380,7 @@ def analyze_linear(tracks, tracks_info, base_ele):
             'mean': np.mean(heading),
             'std': np.std(heading)
         }
-    return track, tracks_info
+    return tracks_info
 
 # Modify the radar[...].inf file
 def modify_radar_inf(path: Path, info: dict, dry: bool = False):

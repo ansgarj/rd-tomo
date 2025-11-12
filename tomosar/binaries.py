@@ -351,7 +351,7 @@ def crx2rnx(crx_file: str|Path) -> Path:
     crx_file.unlink(missing_ok=True)
     return rnx_path
 
-def _generate_merged_filenames(files: list[Path]) -> Path | None:
+def _generate_merged_filenames(files: list[Path], output_dir: Path|str|None = None) -> Path | None:
     pattern = re.compile(
         r"^(?:(?P<station>[A-Z0-9]{9})_)?(?P<source>[A-Z0-9]{1,10})_(?P<datetime>\d{11})_(?P<duration>\d{2}[SMHD])(?:_(?P<freq>\d{2}[SMHD]))?_(?P<type>[A-Z]+)\.(?P<ext>[A-Za-z0-9]{3})$"
     )
@@ -409,17 +409,21 @@ def _generate_merged_filenames(files: list[Path]) -> Path | None:
         if frequency:
             merged_filename += f"_{freq}"
         merged_filename += f"_{out_type}.{out_ext}"
-        merged_filename = files[0].parent / merged_filename
+        if output_dir:
+            output_dir = Path(output_dir)
+        else:
+            output_dir = files[0].parent
+        merged_filename = output_dir / merged_filename
         descriptive_filenames.append(merged_filename)
 
     if len(descriptive_filenames) > 1:
         raise RuntimeError(f"Unable to merge files due to conflicting sources, frequencies, durations, types or extensions. Merging aborted. Files: {files}")
     return descriptive_filenames[0] if descriptive_filenames else None
 
-def merge_rnx(rnx_files: list[str|Path], force: bool = False) -> Path|None:
+def merge_rnx(rnx_files: list[str|Path], force: bool = False, output_dir: Path|str|None = None) -> Path|None:
     if len(rnx_files) == 1:
         return rnx_files[0]
-    merged_file = _generate_merged_filenames(rnx_files)
+    merged_file = _generate_merged_filenames(rnx_files, output_dir=output_dir)
     if merged_file and merged_file.exists() and not force:
         print(f"Discovered merged file {local (merged_file)}. Aborting merge of RNX files.")
         return merged_file
@@ -428,41 +432,42 @@ def merge_rnx(rnx_files: list[str|Path], force: bool = False) -> Path|None:
     print("done.")
     return merged_file
 
-def merge_eph(eph_files: list[str|Path], force: bool = False) -> tuple[Path|None, Path|None]:
+def merge_eph(eph_files: list[Path], force: bool = False, output_dir: Path|str|None = None) -> tuple[Path|None, Path|None]:
+    def perform_merge(in_files: list[str|Path]):
+        if len(in_files) == 1:
+            return in_files[0]
+        merged_file = _generate_merged_filenames(in_files, output_dir=output_dir)
+        if not merged_file:
+            return merged_file
+        suffix = in_files[0].suffix
+        if merged_file.exists() and not force:
+            print(f"Discovered merged file {local(merged_file)}. Aborting merge of {suffix} files.")
+        print(f"Merging {suffix} file > {local(merged_file)} ...", end=" ", flush=True)
+        with merged_file.open("w", encoding="utf-8") as out_file:
+            for i, file_path in enumerate(in_files):
+                with file_path.open("r", encoding="utf-8") as in_file:
+                    for line in in_file:
+                        if "EOF" in line:
+                            continue # Skip EOF line
+                        if i != 0 and line.strip()[0] in ("#", "+", "%", "/"):
+                            continue # Skip header in subsequent files
+                        out_file.write(line)
+            out_file.write("EOF\n")
+        print("done.")
+    
+        return merged_file
+    
     eph_files = [Path(f) for f in eph_files]
     # Get .SP3 files
-    sp3_files = [f for f in eph_files if f.suffix == ".SP3"]
+    sp3_files = [f for f in eph_files if f.suffix in (".SP3", ".sp3")]
     # Merge
-    merged_sp3 = _generate_merged_filenames(sp3_files)
-    if merged_sp3 and  merged_sp3.exists() and not force:
-        print(f"Discovered merged file {local(merged_sp3)}. Aborting merge of .SP3 files.")
-    elif len(sp3_files) == 1:
-        merged_sp3 = sp3_files[0]
-    else:
-        print(f"Merging .SP3 files > {local(merged_sp3)} ...", end=" ", flush=True)
-        with merged_sp3.open("w", encoding="utf-8") as out_file:
-            for file_path in sp3_files:
-                with Path(file_path).open("r", encoding="utf-8") as in_file:
-                    for line in in_file:
-                        out_file.write(line)
-        print("done.")
+    merged_sp3 = perform_merge(sp3_files)
+
 
     # Get .CLK files
-    clk_files = [f for f in eph_files if f.suffix == ".CLK"]
+    clk_files = [f for f in eph_files if f.suffix in (".CLK", ".clk")]
     # Merge
-    merged_clk = _generate_merged_filenames(clk_files)
-    if merged_clk and  merged_clk.exists() and not force:
-        print(f"Discovered merged file {local(merged_clk)}. Aborting merge of .CLK files.")
-    elif len(clk_files) == 1:
-        merged_clk = clk_files[0]
-    else:
-        print(f"Merging .CLK files > {local(merged_clk)} ...", end=" ", flush=True)
-        with merged_clk.open("w", encoding="utf-8") as out_file:
-            for file_path in clk_files:
-                with Path(file_path).open("r", encoding="utf-8") as in_file:
-                    for line in in_file:
-                        out_file.write(line)
-        print("done.")
+    merged_clk = perform_merge(clk_files)
 
     return merged_sp3, merged_clk
 

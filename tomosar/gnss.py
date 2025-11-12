@@ -253,30 +253,27 @@ def merge_swepos_rinex(data_dir: str|Path) -> tuple[Path|None, Path|None]:
 
     # Merge rinex files    
     if obs_files:
-        merged_obs = merge_rnx(obs_files, force=True)
-        # Move outside of tmp dir
-        merged_obs = shutil.move(merged_obs, merged_obs.parent.parent)
+        merged_obs = merge_rnx(obs_files, force=True, output_dir=data_path.parent)
     else:
         merged_obs = None
 
     if nav_files:
-        merged_nav = merge_rnx(nav_files, force=True)
-        # Move outside of tmp dir
-        merged_nav = shutil.move(merged_nav, merged_nav.parent.parent)
+        merged_nav = merge_rnx(nav_files, force=True, output_dir=data_path.parent)
     else:
         merged_nav = None
 
     return merged_obs, merged_nav
 
-def merge_ephemeris(data_dir: str|Path) -> tuple[Path|None, Path|None]:
+def merge_ephemeris(data_dir: str|Path, output_dir: Path|str|None = None) -> tuple[Path|None, Path|None]:
     data_path = Path(data_dir)
-    eph_files = sorted(data_path.glob("*.SP3"))
-    eph_files.extend(sorted(data_path.glob("*.CLK")))
+    eph_files = sorted(data_path.rglob("*.SP3"))
+    eph_files.extend(sorted(data_path.rglob("*.CLK")))
 
     if eph_files:
-        merged_sp3, merged_clk = merge_eph(eph_files, force=True)
-
-    return merged_sp3, merged_clk
+        merged_sp3, merged_clk = merge_eph(eph_files, force=True, output_dir=output_dir)
+        return merged_sp3, merged_clk
+    else:
+        return None, None
 
 def fetch_sp3_clk(
     start_time: datetime,
@@ -293,10 +290,10 @@ def fetch_sp3_clk(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Ensure start time is at least 6 hours before start
-    start_time = start_time #- timedelta(hours=6)
+    start_time = start_time - timedelta(hours=6)
     start_time = start_time.date()
     # Ensure end time is at least 6 hours after end
-    end_time = end_time #+ timedelta(hours=6)
+    end_time = end_time + timedelta(hours=6)
     end_time = end_time.date()
 
     # Collect files to download
@@ -598,8 +595,28 @@ def rtkp(
         max_retries: int = 3,
         dry: bool = False,
         retain: bool = False
-) -> None:
-    """Calls rnx2rtkp and reads the .pos file"""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Performs RTKP processing on the ROVER OBS relative BASE OBS, and stores position in out_path if not pointing to a folder.
+    If if sp3_file (SP3 file) is provided, runs in precise mode (CLK file must be provided if the SP3 file is a pure orbit file).
+    If precise is True and no SP3 file is provided matching precise ephemeris data will be downloaded from ESA (number of
+    parallel downloads specified by max_downloads and each file is attempted up to max_retries times).
+    
+    If a mocoref_file is provided the position of the BASE will be read from there (mocoref data can be read from CSV files, JSON
+    files, LLH logs or mocoref.moco logs as in tomosar.utils.generate_mocoref). Otherwise the BASE position will be read from the
+    BASE OBS header.
+    
+    If a config file is not provided, the Tomosar internal config will be used.
+    
+    If dry is True, the files needed to be downloaded will be displayed but no processing will be run (this will have no effect
+    if not run in precise mode). If retain is True the downloaded ephmeris data will be placed in the output directory, otherwise
+    they will be stored in temporary files.
+    
+    The output directory is the folder containing the out_path, or the folder pointed to by the out_path.
+    
+    Returns:
+    - A Nx3 array with the coordinates (X, Y, Z)
+    - A Nx1 array with GPS time (seconds) for the coordinates
+    - A Nx1 array with the quality conversion (Q) for the coordinates"""
 
     rover_obs = Path(rover_obs)
     if not rover_obs.is_file():
@@ -647,9 +664,9 @@ def rtkp(
                     case '3':
                         print("Available frequencies: L1+L2+L5")
             else:
-                print("No callibration data available. Using all constellations and frequencies.")
+                warn("No callibration data available. Using all constellations and frequencies.")
     
-    print(f"Running RTKP post processing ...\n  Rover: {local(rover_obs)}\n  Base: {local(base_obs)}\n  Nav: {local(nav_file)}\n-->Out: {local(out_path)}", flush=True)
+    print(f"Running RTKP post processing ...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: {local(nav_file)}\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}-->Out: {local(out_path)}", flush=True)
     with resource(config_file, "RTKP_CONFIG", antenna=antenna_type, radome=radome) as config:
         with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
             if sp3_file or precise:
@@ -662,11 +679,7 @@ def rtkp(
                         if failed:
                             raise FileNotFoundError("Download of precise ephemeris and clock data from ESA failed.")
                         
-                        sp3_file, clk_file = merge_ephemeris(tmp_dir)
-                        if retain:
-                            # Move files out of temporary directory
-                            sp3_file = shutil.move(sp3_file, output_dir)
-                            clk_file = shutil.move(clk_file, output_dir)
+                        sp3_file, clk_file = merge_ephemeris(tmp_dir, output_dir=output_dir if retain else tmp_dir)
             if dry:
                 return
             try:
@@ -717,10 +730,6 @@ def rtkp(
     print(f"Quality conversion: Q1 = {quality_conversion:.2f} %")
     return coords, gpst, q
     
-
-
-
-
 def detect_convergence_and_mean(x_vals, y_vals, z_vals, x_err, y_err, z_err, err, window_size=100, threshold_percentile=10, verbose: bool = False):
     # Residuals from full-series mean
     x_res = x_vals - np.mean(x_vals)

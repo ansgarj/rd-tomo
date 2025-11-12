@@ -46,6 +46,8 @@ Running `tomosar forge` scans paths for slice files and intelligently combines t
 ## `fetch-swepos`
 Running `tomosar fetch-swepos` on a drone `gnss_logger_dat-[...].bin` file or RINEX observation file produced from it will find and download matching RINEX observation files from the nearest station in the _Swepos_ network.
 
+_Swepos_ stations usually benefit from a lower _elevation mask_ than the mobile GNSS: if you run `tomosar init --swepos` and don't specify the elevation mask manually, `tomosar init` will use a lower default, but if you fetch _Swepos_ data first manually with `tomosar fetch-swepos` then you may benefit from specifying a lower elevation mask when running `tomosar init`.
+
 **Note**: this can be used as a fallback if we lack GNSS base station files.
 
 ## `station-ppp`
@@ -74,6 +76,7 @@ Running `tomosar sliceinfo` scans a directory for slice files and collects them 
 The `tomosar test` subcommand contains additional subcommands that can be used to test e.g. config files or to verify that all third party binaries are operational. Currently available are:
 - `tomosar test gnss` which tests that all GNSS processing capabilities are operational
 - `tomosar test station-ppp` which tests `station-ppp` against ground truth as found in a `mocoref` data file
+- `tomosar test precise-rktp` which tests RTKP post processing with precise ephemeris data against broadcast ephemeris data (optionally with specified elevation mask)
 
 ## Planned additions
 1. `tomosar process` \[**NOT IMPLEMENTED**\] chains `slice` and `forge` to generate a _Tomogram Directory_, or content for one. 
