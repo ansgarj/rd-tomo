@@ -7,7 +7,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 from .. import ubx2rnx, rnx2rtkp
-from ..gnss import fetch_swepos, station_ppp as run_ppp, read_rnx2rtkp_out, reachz2rnx, rtkp
+from ..gnss import fetch_swepos, station_ppp as run_ppp, read_rnx2rtkp_out, reachz2rnx, rtkp as run_rtkp
 from ..utils import generate_mocoref, ecef2enu
 from ..transformers import geo_to_ecef
 from ..config import LOCAL
@@ -97,6 +97,7 @@ def station_ppp(
     offset: float,
     ref: Path,
 ) -> None:
+    """Test station PPP against ground truth as found in a mocoref file."""
     if target.suffix == ".zip" or is_zip:
         # Assume Reach ZIP archive
         with tmp(target.parent / "tmp", allow_dir=True) as tmp_dir:
@@ -144,23 +145,34 @@ def station_ppp(
 @click.option("-s", "--sbas", 'sbs_path', help="Path to SBAS corrections file", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--mocoref", 'mocoref_path', help="Path to mocoref file for first base", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("-m", "--mask", "elevation_mask", type=float, help="Specify elevation mask")
-def precise_rtkp(rover_obs, base_obs, nav_path, sp3_path, clk_path, conf_path, sbs_path, mocoref_path, elevation_mask) -> None:
-    """Compare solutions from precise and broadcast ephemeris solutions"""
+def precise_rtkp(
+    rover_obs: Path,
+    base_obs: Path,
+    nav_path: Path,
+    sp3_path: Path|None,
+    clk_path: Path|None,
+    conf_path: Path|None,
+    sbs_path: Path|None,
+    mocoref_path: Path|None,
+    elevation_mask: float) -> None:
+    """Compare solutions from precise and broadcast ephemeris data in RTKP post processing"""
 
     # Run base 1
     print("PRECISE:")
-    coords_precise, gpst, q_precise= rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask, precise=True, sp3_file=sp3_path, clk_file=clk_path)
+    coords_precise, gpst, q_precise= run_rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask, precise=True, sp3_file=sp3_path, clk_file=clk_path)
 
     # Run base 2
     print("BROADCAST:")
-    coords_bc, _, q_bc = rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask)
+    coords_bc, _, q_bc = run_rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask)
 
+    # Index tracking
+    precise_only = (q_precise != 1) & (q_bc == 1)
+    bc_only = (q_bc != 1) & (q_precise == 1)
+    both = (q_precise != 1) & (q_bc != 1)
+    
     fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8), sharex=True, tight_layout=True)
     axs = axs.flatten()
     ax = axs[0]
-    precise_only = (q_precise != 1) & (q_bc == 1)
-    bc_only = (q_bc != 1) & (q_precise == 1)
-    both =( q_precise != 1) &( q_bc != 1)
     #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
     ax.plot(gpst, coords_bc[:,2], 'g-', label=f"Broadcast track")
     ax.plot(gpst[precise_only], coords_precise[:,2][precise_only], 'r+', label=f"Precise only float")
@@ -173,6 +185,70 @@ def precise_rtkp(rover_obs, base_obs, nav_path, sp3_path, clk_path, conf_path, s
     diff = np.vstack([
         ecef2enu(coords_precise[n, 0], coords_precise[n, 1]) @ 
             (np.asarray(geo_to_ecef.transform(*coords_bc[n, :])) - np.asarray(geo_to_ecef.transform(*coords_precise[n, :])))
+            for n in range(len(gpst))
+    ])
+
+    dist = np.sqrt((diff**2).sum(axis=1))
+
+    ax.plot(gpst, dist, label="Distance (m)")
+    ax.set_ylabel("Coordinate difference (m)")
+
+    fig.supxlabel("GPST (s)")
+
+    plt.show()
+
+@test.command()
+@click.argument("rover_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
+@click.argument("nav_path", type=click.Path(exists=True, path_type=Path, dir_okay=False))
+@click.argument("base_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
+@click.option("--sp3", "sp3_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to SP3 file (if not specifed: download)", default=None)
+@click.option("--clk", "clk_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to CLK file to complement SP3 file if needed", default=None)
+@click.option("-k", "--config", 'conf_path', help="Path to config file", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("-s", "--sbas", 'sbs_path', help="Path to SBAS corrections file", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--mocoref", 'mocoref_path', help="Path to mocoref file for first base", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("-m", "--mask", "elevation_mask", type=float, help="Specify elevation mask")
+@click.option("--precise", "use_precise", is_flag=True, help="Download precise ephemeris data (if not provided)")
+def rtkp(
+    rover_obs: Path,
+    base_obs: Path,
+    nav_path: Path,
+    sp3_path: Path|None,
+    clk_path: Path|None,
+    conf_path: Path|None,
+    sbs_path: Path|None,
+    mocoref_path: Path|None,
+    elevation_mask: float,
+    use_precise: bool) -> None:
+    """Compare solutions from internal and raw RTKP post processing"""
+
+    # Run base 1
+    print("INTERNAL:")
+    coords_int, gpst, q_int= run_rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask, precise=use_precise, sp3_file=sp3_path, clk_file=clk_path)
+
+    # Run base 2
+    print("RAW:")
+    coords_raw, _, q_raw = run_rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask, raw=True, precise=use_precise, sp3_file=sp3_path, clk_file=clk_path)
+
+    # Index tracking
+    int_only = (q_int != 1) & (q_raw == 1)
+    raw_only = (q_raw != 1) & (q_int == 1)
+    both = (q_int != 1) & (q_raw != 1)
+    
+    fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8), sharex=True, tight_layout=True)
+    axs = axs.flatten()
+    ax = axs[0]
+    #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
+    ax.plot(gpst, coords_int[:,2], 'g-', label=f"Internal track")
+    ax.plot(gpst[int_only], coords_int[:,2][int_only], 'r+', label=f"Internal only float")
+    ax.plot(gpst[raw_only], coords_raw[:,2][raw_only], 'm+', label=f"Raw only float")
+    ax.plot(gpst[both], coords_int[:,2][both], 'y+', label=f"Both float")
+    ax.set_ylabel("Ellipsoidal Height (m)")
+    ax.legend()
+    ax = axs[1]
+
+    diff = np.vstack([
+        ecef2enu(coords_int[n, 0], coords_int[n, 1]) @ 
+            (np.asarray(geo_to_ecef.transform(*coords_raw[n, :])) - np.asarray(geo_to_ecef.transform(*coords_int[n, :])))
             for n in range(len(gpst))
     ])
 

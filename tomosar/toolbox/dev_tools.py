@@ -8,11 +8,8 @@ import matplotlib
 import csv
 import struct
 import numpy as np
-from tqdm import tqdm
 
-from ..gnss import extract_rnx_info, read_glab_out, rtkp
-from ..utils import ecef2enu
-from ..transformers import geo_to_ecef
+from ..gnss import extract_rnx_info, read_glab_out
 from ..config import PACKAGE_PATH
 from .setup_tools import install_changed
 
@@ -181,61 +178,6 @@ def inspect_out(file: Path) -> None:
         plt.title("Divergence plot")
         plt.legend()
     plt.show()
-
-@dev.command()
-@click.argument("rover_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
-@click.argument("nav_path", type=click.Path(exists=True, path_type=Path, dir_okay=False))
-@click.argument("base_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
-@click.option("--sp3", "sp3_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to SP3 file (if not specifed: download)", default=None)
-@click.option("--clk", "clk_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to CLK file to complement SP3 file if needed", default=None)
-@click.option("-k", "--config", 'conf_path', help="Path to config file", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("-s", "--sbas", 'sbs_path', help="Path to SBAS corrections file", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("--mocoref", 'mocoref_path', help="Path to mocoref file for first base", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("-m", "--mask", "elevation_mask", type=float, help="Specify elevation mask")
-def compare_rtkp(rover_obs, base_obs, nav_path, sp3_path, clk_path, conf_path, sbs_path, mocoref_path, elevation_mask) -> None:
-    """Compare solutions from precise and broadcast ephemeris solutions"""
-
-    # Run base 1
-    print("PRECISE:")
-    coords_precise, gpst, q_precise= rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask, precise=True, sp3_file=sp3_path, clk_file=clk_path)
-
-    # Run base 2
-    print("BROADCAST:")
-    coords_bc, _, q_bc = rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask)
-
-    fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8), sharex=True, tight_layout=True)
-    axs = axs.flatten()
-    ax = axs[0]
-    precise_only = (q_precise != 1) & (q_bc == 1)
-    bc_only = (q_bc != 1) & (q_precise == 1)
-    both =( q_precise != 1) &( q_bc != 1)
-    #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
-    ax.plot(gpst, coords_bc[:,2], 'g-', label=f"Broadcast track")
-    ax.plot(gpst[precise_only], coords_precise[:,2][precise_only], 'r+', label=f"Precise only float")
-    ax.plot(gpst[bc_only], coords_bc[:,2][bc_only], 'm+', label=f"Broadcast only float")
-    ax.plot(gpst[both], coords_bc[:,2][both], 'y+', label=f"Both float")
-    ax.set_ylabel("Ellipsoidal Height (m)")
-    ax.legend()
-    ax = axs[1]
-
-    diff = np.vstack([
-        ecef2enu(coords_precise[n, 0], coords_precise[n, 1]) @ 
-            (np.asarray(geo_to_ecef.transform(*coords_bc[n, :])) - np.asarray(geo_to_ecef.transform(*coords_precise[n, :])))
-            for n in range(len(gpst))
-    ])
-
-    dist = np.sqrt((diff**2).sum(axis=1))
-
-    ax.plot(gpst, dist, label="Distance (m)")
-    #ax.plot(gpst, diff[:,0], label="Latitude (deg)")
-    #ax.plot(gpst, diff[:,1], label="Longitude (deg)")
-    #ax.plot(gpst, diff[:,2], label="Height (m)")
-    ax.set_ylabel("Coordinate difference (m)")
-
-    fig.supxlabel("GPST (s)")
-
-    plt.show()
-
 
 @dev.command()
 def update_install() -> None:

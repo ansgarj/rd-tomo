@@ -81,7 +81,7 @@ def substitute_flags(path: Path, resolved: dict):
 
     pattern = re.compile(r"\{\{(\w+)\}\}")
 
-    def replacer(match):
+    def replacer(match: re.Match|None) -> str:
         return resolved.get(match.group(1), match.group(0))
 
     substituted = pattern.sub(replacer, content)
@@ -809,7 +809,7 @@ def rnx2rtkp(
         mocoref_line: int = 1,
         antenna_type: str = None,
         radome: str = "NONE",
-        constellations: list[str]|None = None,
+        constellations: list[str] = [],
         freqs: str = ""
 ) -> str:
     """Runs RTKLIB's rnx2rtkp with dynamic command construction based on available resources."""

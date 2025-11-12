@@ -177,7 +177,7 @@ def changed(hash_file: Path|str, input: list[Path|str]|Path|str, generate_hash: 
     return generate_hash
 
 # Transformation to local ENU frame from ECEF
-def ecef2enu(lat, lon) -> np.ndarray:
+def ecef2enu(lat: float, lon: float) -> np.ndarray:
     lon = np.radians(lon)
     lat = np.radians(lat)
     return np.array([

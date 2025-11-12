@@ -532,7 +532,7 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> tuple[np.ndarray,
 
     return mean, rotation,  idx, diff, np.asarray((x_res, y_res, z_res))
 
-def modify_config(config_path: Path, standard: bool = False, precise: bool = False) -> None:
+def modify_config(config_path: Path, standard: bool = False, precise: bool = False, raw: bool = False) -> None:
     """
     Modifies an existing RTKLIB config file to enable precise ephemeris mode
     and sets the paths to SP3 and CLK files.
@@ -544,8 +544,8 @@ def modify_config(config_path: Path, standard: bool = False, precise: bool = Fal
     - output_path: Path to save the modified config file
     """
 
-    if not (standard or precise):
-        warn("Running modify_config with standard=False and precise=False has no effect.")
+    if not (standard or precise or raw ):
+        warn("Running modify_config with standard=False, precise=False and raw=False has no effect.")
         return
     
     # Read the original config file
@@ -555,6 +555,9 @@ def modify_config(config_path: Path, standard: bool = False, precise: bool = Fal
     if precise:
         # Flag to check if the required field is found
         sateph_found = False
+    
+    if raw:
+        pattern = re.compile(r"/.+\n")
 
     # Modify the relevant lines
     for i, line in enumerate(lines):
@@ -567,7 +570,10 @@ def modify_config(config_path: Path, standard: bool = False, precise: bool = Fal
             # Remove explorer specific fields
             if "# This requires the Explorer version of RTKLIB" in line:
                 lines[i] = ''
-
+        if raw:
+            # Remove internal resources
+            lines[i] = pattern.sub('\n', line)
+    
     if precise:
         # Append missing fields if not found
         if not sateph_found:
@@ -594,7 +600,8 @@ def rtkp(
         max_downloads: int = 10,
         max_retries: int = 3,
         dry: bool = False,
-        retain: bool = False
+        retain: bool = False,
+        raw: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Performs RTKP processing on the ROVER OBS relative BASE OBS, and stores position in out_path if not pointing to a folder.
     If if sp3_file (SP3 file) is provided, runs in precise mode (CLK file must be provided if the SP3 file is a pure orbit file).
@@ -610,6 +617,8 @@ def rtkp(
     If dry is True, the files needed to be downloaded will be displayed but no processing will be run (this will have no effect
     if not run in precise mode). If retain is True the downloaded ephmeris data will be placed in the output directory, otherwise
     they will be stored in temporary files.
+
+    The raw parameter can be set to True in order NOT to use internal Tomosar resources.
     
     The output directory is the folder containing the out_path, or the folder pointed to by the out_path.
     
@@ -644,31 +653,36 @@ def rtkp(
 
     antenna_type, radome = _ant_type(base_obs)
     print(f"Detected base antenna type: {antenna_type} {radome}")
-    with resource(None, "SATELLITES") as atx:
-        with resource(None, "RECEIVER", antenna=antenna_type, radome=radome) as receiver:
-            if receiver is None:
-                receiver_file = atx
-            else:
-                receiver_file = receiver
-            
-            constellations, freqs, fallback = _parse_atx(receiver_file, antenna_type=antenna_type, radome=radome, mode="rnx2rtkp")
-            if fallback:
-                print("Defaulted to NONE radome")
-            if constellations:
-                print(f"Avaialable constellations: {','.join(constellations)}")
-                match freqs:
-                    case '1':
-                        print("Available frequencies: L1")
-                    case '2':
-                        print("Available frequencies: L1+L2")
-                    case '3':
-                        print("Available frequencies: L1+L2+L5")
-            else:
-                warn("No callibration data available. Using all constellations and frequencies.")
+    if not raw:
+        with resource(None, "SATELLITES") as atx:
+            with resource(None, "RECEIVER", antenna=antenna_type, radome=radome) as receiver:
+                if receiver is None:
+                    receiver_file = atx
+                else:
+                    receiver_file = receiver
+                
+                constellations, freqs, fallback = _parse_atx(receiver_file, antenna_type=antenna_type, radome=radome, mode="rnx2rtkp")
+                if fallback:
+                    print("Defaulted to NONE radome")
+                if constellations:
+                    print(f"Avaialable constellations: {','.join(constellations)}")
+                    match freqs:
+                        case '1':
+                            print("Available frequencies: L1")
+                        case '2':
+                            print("Available frequencies: L1+L2")
+                        case '3':
+                            print("Available frequencies: L1+L2+L5")
+                else:
+                    warn("No callibration data available. Using all constellations and frequencies.")
     
     print(f"Running RTKP post processing ...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: {local(nav_file)}\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}-->Out: {local(out_path)}", flush=True)
     with resource(config_file, "RTKP_CONFIG", antenna=antenna_type, radome=radome) as config:
         with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
+            if raw:
+                modify_config(config, raw=True)
+                constellations = []
+                freqs = ""
             if sp3_file or precise:
                 # Modify to precise pos1-eph mode
                 modify_config(config, precise=True)
