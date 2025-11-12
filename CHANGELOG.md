@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - `tomosar.gnss.modify_config` (see below)
 - `tomosar test precise-rktp` which can be used to test precise RTKP mode against broadcast to determine which to use
+- Added automatic UTM zone detection to `tomosar.trackfinder._get_azimuth`
 
 ### Changed
 - `tomosar.binaries.tmp` no longer creates parents to temporary directories (which were not temporary), but fails if all parents do not exist
@@ -18,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - `tomosar.gnss.rtkp` now handles `out_path` and output directory similarly as `tomosar.gnss.station_ppp`, and if `out_path` is `None` then `tomosar.binaries.rnx2rtkp` captures output instead of writing a `.pos` file (**Note**: This means that the counter while it is running is not visible if no `out_path` is provided, but the total Q1 percentage is still displayed after finishing)
 - Renamed `tomosar.gnss.read_pos_file` to `tomosar.gnss.read_rnx2rtkp_out` and `tomosar.gnss.read_out_file` to `tomosar.gnss.read_glab_out` and changed both to distinguish between file and stdout input by whether it is a string or a `pathlib.Path` object
 - `tomosar init` now uses precise ephemeris data in its RTKP post processing by default
+- Changed `tomosar.trackfinding.analyze_spiral` to calculate flight altitude, radius and azimuth in the local ENU frame of the center
 
 ### Fixed
 - Fixed bug in `tomosar --version` that caused it to sometimes display the previous version

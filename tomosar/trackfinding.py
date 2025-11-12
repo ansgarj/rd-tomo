@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from multiprocessing import Pool, Manager
 from datetime import datetime, timedelta
-from pyproj import Transformer
+from pyproj import Transformer, CRS
 from scipy.optimize import minimize
 from pathlib import Path
 import math
@@ -13,14 +13,15 @@ from collections import defaultdict, Counter
 import json
 from matplotlib.figure import Figure
 
-from .utils import find_inliers, format_duration, add_meta
+from .utils import find_inliers, format_duration, add_meta, ecef2enu
+from .transformers import geo_to_ecef
 from .binaries import elevation
 from .apperture import SARModel
 from .config import Frequencies
 FREQUENCIES = Frequencies()
 
 # Find flights
-def find_flights(imu_log: pd.DataFrame):
+def find_flights(imu_log: pd.DataFrame) -> tuple[list[pd.DataFrame], float, np.ndarray]:
     # Parameters
     minimum_flight_alt = 30  # meters
     minimum_flight_dur = timedelta(minutes=1)
@@ -67,7 +68,7 @@ def find_flights(imu_log: pd.DataFrame):
     return flights, time_step, window_size
 
 # Classify flights
-def classify_flights(flights):
+def classify_flights(flights: list[pd.DataFrame]) -> list[tuple[str, pd.DataFrame]]:
     required_turns = 2
     spiral_flights = []
     linear_flights = []
@@ -81,16 +82,16 @@ def classify_flights(flights):
 
     return [('Spiral', flight) for flight in spiral_flights] + [('Linear', flight) for flight in linear_flights]
 
-def _yaw(flight):
+def _yaw(flight: pd.DataFrame) -> np.ndarray:
     # Convert heading from degrees to radians and unwrap
     return np.unwrap(np.pi * flight["heading (deg)"] / 180)
 
-def _yaw_dif(flight):
+def _yaw_dif(flight: pd.DataFrame) -> np.floating:
     y = _yaw(flight)
     return np.max(y) - np.min(y)
 
 # Refine flights
-def refine_flights(flights, time_step, window_size, npar: int = os.cpu_count()):
+def refine_flights(flights: list[tuple[str, pd.DataFrame]], time_step: float, window_size: np.ndarray, npar: int = os.cpu_count()) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:
 
     with Pool(processes=npar) as pool:
         results = pool.map(_refine, [
@@ -102,7 +103,7 @@ def refine_flights(flights, time_step, window_size, npar: int = os.cpu_count()):
             (isinstance(track, list) and track)
         ]
 
-def _refine(args):
+def _refine(args: tuple[tuple[str, pd.DataFrame], float, np.ndarray]) -> tuple[str, pd.DataFrame, pd.DataFrame]:
     tagged_flight, time_step, window_size = args
     tag = tagged_flight[0]
     flight = tagged_flight[1]
@@ -112,7 +113,7 @@ def _refine(args):
         return tag, flight, _refine_spiral(flight, time_step=time_step, window_size=window_size)
     
 ## Refine spiral
-def _refine_spiral(flight, time_step, window_size):
+def _refine_spiral(flight: pd.DataFrame, time_step: float, window_size: np.ndarray) -> pd.DataFrame:
     tol = 3e-3  # tolerance for second derivative of yaw
 
     # Step 1: Get yaw and smooth it
@@ -156,21 +157,52 @@ def _refine_spiral(flight, time_step, window_size):
     refined_segment = segment.iloc[inliers].copy()
     return refined_segment
 
-def _get_azimuth(spiral_track):
+def _get_azimuth(spiral_track: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, float, float]:
     # Get lat/lon coordinates for conversion to UTM coordinates
-    lat = spiral_track["lat (deg)"].values
-    lon = spiral_track["lon (deg)"].values
+    lat = spiral_track["lat (deg)"].to_numpy()
+    lon = spiral_track["lon (deg)"].to_numpy()
 
-    # Use pyproj to convert to UTM (auto zone detection could be added)
-    transformer = Transformer.from_crs("epsg:4326", "epsg:32633", always_xy=True)
-    x, y = transformer.transform(lon, lat)
+    # Use pyproj to convert to UTM
+    def to_utm(lat: np.ndarray, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Returns the UTM CRS and projected coordinates for a given latitude and longitude.
+        Handles Norway and Svalbard special cases.
+        """
+        # Compute base zone
+        zone = int((lon[0] + 180) / 6) + 1
+
+        # Handle Norway and Svalbard exceptions
+        # Norway: Zone 32 for 56°N–64°N and 3°E–12°E
+        if 56 <= lat[0] < 64 and 3 <= lon[0] < 12:
+            zone = 32
+        # Svalbard: Zones 31–37 for 72°N–84°N
+        if 72 <= lat[0] < 84:
+            if lon[0] >= 0 and lon[0] < 9:
+                zone = 31
+            elif lon[0] < 21:
+                zone = 33
+            elif lon[0] < 33:
+                zone = 35
+            else:
+                zone = 37
+
+        # Hemisphere and EPSG code
+        epsg = 32600 + zone if lat[0] >= 0 else 32700 + zone
+        crs = CRS.from_epsg(epsg)
+
+        # Transform coordinates
+        transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+        x, y = transformer.transform(lon, lat)
+
+        return x, y
+    x, y = to_utm(lat=lat, lon=lon)
     coords = np.column_stack((x, y))
 
     # Initial guess: centroid
     initial_center = coords.mean(axis=0)
 
     # Objective function: deviation from linear radius vs angle
-    def spiral_error(center):
+    def spiral_error(center: np.ndarray) -> np.floating:
         dx = coords[:, 0] - center[0]
         dy = coords[:, 1] - center[1]
         radius = np.sqrt(dx**2 + dy**2)
@@ -195,7 +227,7 @@ def _get_azimuth(spiral_track):
     return az, r, lat0, lon0
 
 ## Refine linear
-def _refine_linear(flight, time_step) -> list[pd.DataFrame]:
+def _refine_linear(flight: pd.DataFrame, time_step: float) -> list[pd.DataFrame]:
     tol_const = 1.1
     tol_par = 0.01
     min_flight_time = 5  # seconds
@@ -331,10 +363,14 @@ def analyze_spiral(track: pd.DataFrame, track_info: dict, base_ele: float, dem_p
     track_info['t_start'] = format_duration(track['% GPST (s)'].iloc[0])
     track_info['t_end'] = format_duration(track['% GPST (s)'].iloc[-1])
     track_info['duration (s)'] = track['% GPST (s)'].iloc[-1] - track['% GPST (s)'].iloc[0]
-    # Calculate new variables and parameters
-    az, r, lat0, lon0 = _get_azimuth(track)
+    # Find center voxel
+    _, _, lat0, lon0 = _get_azimuth(track)
     h0 = elevation(lat0, lon0, dem_path)
-    flight_alt = track['alt (m)'].to_numpy() - h0 # Flight altitude relative center point
+    # Calculate ENU distance vector from center to track
+    diff = ecef2enu(lat0, lon0) @ (geo_to_ecef.transform(track['lon (deg)'].to_numpy(), track['lat (deg)'].to_numpy(), track['alt (m)'].to_numpy()) - geo_to_ecef.transform(lon0, lat0, h0))
+    flight_alt = diff[2] # Flight altitude relative center point (m)
+    r = np.sqrt(diff[0]**2 + diff[1]**2) # radius relative center point (m)
+    az = np.unwrap(np.arctan2(diff[0], diff[1])) * 180 / np.pi # azimuth relative center point (deg)
     # Add variables to track data
     track['radius (m)'] = r
     track['azimuth (deg)'] = az
@@ -383,7 +419,7 @@ def analyze_linear(tracks: list[pd.DataFrame], tracks_info: dict, base_ele: floa
     return tracks_info
 
 # Modify the radar[...].inf file
-def modify_radar_inf(path: Path, info: dict, dry: bool = False):
+def modify_radar_inf(path: Path, info: dict, dry: bool = False) -> None:
     """
     Modify radar_logger_dat-[...].inf file with new track timestamps.
     
@@ -405,7 +441,7 @@ def modify_radar_inf(path: Path, info: dict, dry: bool = False):
     inf_path = folder / base_name
 
     # Try ±1 second if file not found
-    def try_alternatives(ts):
+    def try_alternatives(ts) -> Path|None:
         dt = datetime.strptime(ts, "%H-%M-%S")
         for delta in [1, -1]:
             new_ts = (dt + timedelta(seconds=delta)).strftime("%H-%M-%S")

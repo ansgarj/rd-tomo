@@ -27,7 +27,7 @@ from ..transformers import ecef_to_geo
 @click.option("--llh", "is_llh", is_flag=True, help="Force mocoref data to be read from LLH file")
 @click.option("-h", "--header", is_flag=True, help="Read mocoref data from RINEX header (no separate file, use ONLY if RINEX header is known to contain precise position)")
 @click.option("-p", "--processing", "is_processing_dir", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
-@click.option("--precise", "use_precise", is_flag=True, help="Attempt to use precise ephemeris data (NOTE: this may degrade solution, run tomosar test precise-rktp to test)")
+@click.option("--precise", "use_precise", is_flag=True, help="Use precise ephemeris data (NOTE: this may degrade solution, run tomosar test precise-rktp to test)")
 @click.option("-t", "--tag", default = "", flag_value=date.today().strftime('%Y%m%d'), help="Tag processing directory with specified string (default: the date of today)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 @click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
