@@ -461,6 +461,24 @@ def parse_datetime_string(s: str) -> datetime|date|time:
     
     raise ValueError(f"Could not parse '{s}' as datetime, date, or time.")
 
+# replace N:th occurence of pattern in a string
+def string_sub(text: str, pattern: str, replacement: str, n: int = 1) -> str:
+    """
+    Replace the nth occurrence of a regex pattern in the given text.
+
+    :param text: The input string.
+    :param pattern: The regex pattern to search for.
+    :param replacement: The string to replace the nth occurrence with.
+    :param n: The occurrence index (1-based).
+    :return: Modified string with nth occurrence replaced.
+    """
+    matches = list(re.finditer(pattern, text))
+    if n <= 0 or n > len(matches):
+        return text  # No change if n is out of range
+
+    start, end = matches[n - 1].span()
+    return text[:start] + replacement + text[end:]
+
 # Bin variables from a dict or pd.DataFrame according to the corresponding angular value
 def bin_by_angle(theta, vars, bin_count=None, units='degrees', rotate: bool = False) -> tuple[dict[np.ndarray],str]:
     """

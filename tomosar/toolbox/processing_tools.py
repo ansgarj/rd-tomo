@@ -12,7 +12,7 @@ from ..trackfinding import trackfinder as run_trackfinder
 from .. import ImageInfo, TomoScenes, Settings
 from ..utils import interactive_console, extract_datetime, local, warn, drop_into_terminal, generate_mocoref
 from ..forging import tomoforge
-from ..binaries import chc2rnx, reach2rnx, ubx2rnx, tmp, merge_eph
+from ..binaries import chc2rnx, reach2rnx, ubx2rnx, tmp, splice_sp3, splice_clk
 from ..transformers import ecef_to_geo
 
 @click.command()
@@ -232,9 +232,8 @@ def init(
     with tmp("tmp", allow_dir=True) as tmp_dir:
         # Work on SP3 files
         if sp3_files["SP3"]:
-            eph_files = sp3_files["SP3"]
-            eph_files.extend(sp3_files["CLK"])
-            sp3_file, clk_file = merge_eph(eph_files, output_dir=tmp_dir)
+            sp3_file = splice_sp3(sp3_files["SP3"])
+            clk_file = splice_clk(sp3_files["CLK"])
             if sp3_file and tmp_dir not in sp3_file.parents:
                 print(f"Located SP3 file: {sp3_file}")
             if clk_file and tmp_dir not in clk_file.parents:
@@ -423,8 +422,8 @@ def init(
 
         # If station-ppp was used initate SP3 and CLK files
         if ppp:
-            sp3_file = initiate_file(sp3_file, radar_dir)
-            clk_file = initiate_file(clk_file, radar_dir)
+            sp3_file = initiate_file(sp3_file, ground_dir)
+            clk_file = initiate_file(clk_file, ground_dir)
         
         # Move into processing dir
         os.chdir(processing_dir)

@@ -6,12 +6,11 @@ import math
 import numpy as np
 from matplotlib import pyplot as plt
 
-from .. import ubx2rnx, rnx2rtkp
-from ..gnss import fetch_swepos, station_ppp as run_ppp, read_rnx2rtkp_out, reachz2rnx, rtkp as run_rtkp
+from ..gnss import fetch_swepos, station_ppp as run_ppp, reachz2rnx, rtkp as run_rtkp
 from ..utils import generate_mocoref, ecef2enu
 from ..transformers import geo_to_ecef
 from ..config import LOCAL
-from ..binaries import resource, tmp
+from ..binaries import resource, tmp, ubx2rnx
 
 @click.group()
 def test() -> None:
@@ -47,7 +46,7 @@ def gnss(savar) -> None:
 
         print()
         print("Running station PPP post processing on Swepos files ...")
-        _, _, distance = run_ppp(swepos_obs, swepos_nav, header=False)
+        _, _, distance = run_ppp(swepos_obs, swepos_nav, header=False, out_path=swepos_obs.with_suffix(".out"))
 
         if distance < 0.2:
             print("TEST: station PPP sucessful")
@@ -57,12 +56,15 @@ def gnss(savar) -> None:
 
         # Run RTKP
         out_path = rover_obs.with_suffix(".pos")
-        rnx2rtkp(rover_obs, swepos_obs, rover_nav, out_path)
+        _, gpst, q = run_rtkp(
+            rover_obs=rover_obs,
+            base_obs=swepos_obs,
+            nav_file=rover_nav,
+            out_path=out_path
+        )
         try: 
-            _, gpst, q = read_rnx2rtkp_out(out_path)
             quality_conversion = np.sum(q == 1) / len(q) * 100
             dur = timedelta(seconds=gpst[-1] - gpst[0])
-            q
             print(f"Total {dur} processed, Q1={quality_conversion:.2f} %")
         except:
             raise RuntimeError("rnx2rtkp failed to produce a .pos file with content")

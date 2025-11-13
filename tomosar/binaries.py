@@ -17,8 +17,9 @@ import numpy as np
 from pyproj import Transformer
 from datetime import datetime, timezone, timedelta
 
-from .utils import changed, warn, local, generate_mocoref
+from .utils import changed, warn, local, generate_mocoref, string_sub
 from .config import Settings, LOCAL
+from .version import version
 
 # Catch-all run command for binariy executables
 def run(cmd: str | list, capture: bool = True) -> subprocess.CompletedProcess:
@@ -351,13 +352,15 @@ def crx2rnx(crx_file: str|Path) -> Path:
     crx_file.unlink(missing_ok=True)
     return rnx_path
 
-def _generate_merged_filenames(files: list[Path], output_dir: Path|str|None = None) -> Path | None:
+def _generate_merged_filenames(files: list[Path], output_dir: Path|str|None = None) -> tuple[Path|None, datetime|None, datetime|None]:
     pattern = re.compile(
         r"^(?:(?P<station>[A-Z0-9]{9})_)?(?P<source>[A-Z0-9]{1,10})_(?P<datetime>\d{11})_(?P<duration>\d{2}[SMHD])(?:_(?P<freq>\d{2}[SMHD]))?_(?P<type>[A-Z]+)\.(?P<ext>[A-Za-z0-9]{3})$"
     )
     units = re.compile(r"(?P<number>\d{2})(?P<unit>[SMHD])")
     grouped = defaultdict(set)
-
+    if not files:
+        return None, None, None
+    
     for f in files:
         if (match := pattern.match(f.name)):
             type_raw = match.group("type")
@@ -382,14 +385,14 @@ def _generate_merged_filenames(files: list[Path], output_dir: Path|str|None = No
 
     descriptive_filenames = []
     for (station, source, frequency, type, duration, ext), datetimes in grouped.items():
-        datetime = min(datetimes)
+        dt_min = min(datetimes)
         if (match := units.match(duration)):
-            dur = int(match.group("number"))
+            base_dur = int(match.group("number"))
             dur_unit = match.group("unit")
         else:
             raise RuntimeError(f"Failed to parse filenames: {files}")
         no_files = len(datetimes)
-        dur *= no_files
+        dur = base_dur * no_files
 
         if type == "OBS":
             out_type = "MO"
@@ -397,79 +400,262 @@ def _generate_merged_filenames(files: list[Path], output_dir: Path|str|None = No
         elif type == "NAV":
             out_type = "MN"
             out_ext = "nav"
-        elif type in {"ORB", "CLK"}:
+        else:
             out_type = type
             out_ext = ext
-        else:
-            out_type = type
         if station:
-            merged_filename = f"{station}_{source}_{datetime}_{dur:02}{dur_unit}"
+            merged_filename = f"{station}_{source}_{dt_min}_{dur:02}{dur_unit}"
         else:
-            merged_filename = f"{source}_{datetime}_{dur:02}{dur_unit}"
+            merged_filename = f"{source}_{dt_min}_{dur:02}{dur_unit}"
         if frequency:
-            merged_filename += f"_{freq}"
+            merged_filename += f"_{frequency}"
         merged_filename += f"_{out_type}.{out_ext}"
         if output_dir:
             output_dir = Path(output_dir)
         else:
             output_dir = files[0].parent
         merged_filename = output_dir / merged_filename
-        descriptive_filenames.append(merged_filename)
+        # Verify that the included files form a sequence
+        pattern = re.compile(r'(?P<year>\d{4})(?P<doy>\d{3})(?P<hour>\d{2})(?P<minute>\d{2})')
+        match dur_unit:
+            case "S":
+                step = timedelta(seconds=base_dur)
+            case "M":
+                step = timedelta(minutes=base_dur)
+            case "H":
+                step = timedelta(hours=base_dur)
+            case "D":
+                step = timedelta(days=base_dur)
+        start = None
+        current = None
+        previous = None
+        for dt in sorted(datetimes):
+            match = pattern.match(str(dt))
+            if current:
+                previous = current
+            current = datetime(year=int(match.group("year")), month=1, day=1, hour=int(match.group("hour")), minute=int(match.group("minute"))) + timedelta(days=int(match.group("doy"))-1)
+            if previous and not current == previous + step:
+                missing_dt = previous + step
+                missing_dt = f"{missing_dt.year:04}{missing_dt.timetuple().tm_yday:03}{missing_dt.hour:02}{missing_dt.minute:02}"
+                if station:
+                    missing_file = f"{station}_{source}"
+                else:
+                    missing_file = f"{source}"
+                missing_file += f"_{missing_dt}_{duration}"
+                if frequency:
+                    missing_file += f"_{frequency}"
+                missing_file += f"_{out_type}.{out_ext}"
+                raise FileNotFoundError(f"Unable to merge files due to missing file: {missing_file}")
+            if not start:
+                start = current
+        # If successful append merged filename
+        descriptive_filenames.append((merged_filename, start, current + step))
 
+    # Verfiy that only files from a single sequence were passed
     if len(descriptive_filenames) > 1:
         raise RuntimeError(f"Unable to merge files due to conflicting sources, frequencies, durations, types or extensions. Merging aborted. Files: {files}")
-    return descriptive_filenames[0] if descriptive_filenames else None
+    return descriptive_filenames[0] if descriptive_filenames else (None, None, None)
 
 def merge_rnx(rnx_files: list[str|Path], force: bool = False, output_dir: Path|str|None = None) -> Path|None:
     if len(rnx_files) == 1:
-        return rnx_files[0]
-    merged_file = _generate_merged_filenames(rnx_files, output_dir=output_dir)
-    if merged_file and merged_file.exists() and not force:
+        merged_file = shutil.copy2(rnx_files[0], output_dir)
+        return merged_file
+    merged_file, t_start, t_end = _generate_merged_filenames(rnx_files, output_dir=output_dir)
+    if not merged_file:
+        return None
+    if merged_file.exists() and not force:
         print(f"Discovered merged file {local (merged_file)}. Aborting merge of RNX files.")
         return merged_file
-    print(f"Merging rinex files > {local(merged_file)} ...", end=" ", flush=True)
+    print(f"Merging RINEX files > {local(merged_file)} ...", end=" ", flush=True)
     run(["gfzrnx", "-f", "-q", "-finp"] + [f for f in rnx_files] + ["-fout", merged_file])
     print("done.")
     return merged_file
 
-def merge_eph(eph_files: list[Path], force: bool = False, output_dir: Path|str|None = None) -> tuple[Path|None, Path|None]:
-    def perform_merge(in_files: list[str|Path]):
-        if len(in_files) == 1:
-            return in_files[0]
-        merged_file = _generate_merged_filenames(in_files, output_dir=output_dir)
-        if not merged_file:
-            return merged_file
-        suffix = in_files[0].suffix
-        if merged_file.exists() and not force:
-            print(f"Discovered merged file {local(merged_file)}. Aborting merge of {suffix} files.")
-        print(f"Merging {suffix} file > {local(merged_file)} ...", end=" ", flush=True)
-        with merged_file.open("w", encoding="utf-8") as out_file:
-            for i, file_path in enumerate(in_files):
-                with file_path.open("r", encoding="utf-8") as in_file:
-                    for line in in_file:
-                        if "EOF" in line:
-                            continue # Skip EOF line
-                        if i != 0 and line.strip()[0] in ("#", "+", "%", "/"):
-                            continue # Skip header in subsequent files
-                        out_file.write(line)
-            out_file.write("EOF\n")
-        print("done.")
-    
+def splice_sp3(eph_files: list[Path], force: bool = False, output_dir: Path|str|None = None) -> tuple[Path|None, Path|None]:
+    """Splice multiple SP3 files into one, preserving header and data integrity"""
+    if len(eph_files) == 1:
+        merged_file = shutil.copy2(eph_files[0], output_dir)
         return merged_file
     
-    eph_files = [Path(f) for f in eph_files]
-    # Get .SP3 files
-    sp3_files = [f for f in eph_files if f.suffix in (".SP3", ".sp3")]
-    # Merge
-    merged_sp3 = perform_merge(sp3_files)
+    eph_files.sort()
+    merged_file, t_start, t_end = _generate_merged_filenames(eph_files, output_dir=output_dir)
+    if not merged_file:
+        return None
+    if merged_file.exists() and not force:
+        print(f"Discovered merged file {local(merged_file)}. Aborting merge of SP3 files.")
+    print(f"Merging SP3 files > {local(merged_file)} ...", end=" ", flush=True)
+    # Write spliced file
+    with merged_file.open("w", encoding="utf-8") as out_file:
+        first_epoch = False
+        for i, file_path in enumerate(eph_files):
+            with file_path.open("r", encoding="utf-8") as in_file:
+                for line in in_file:
+                    if "EOF" in line:
+                        continue # Skip EOF line
+                    if i != 0 and line.strip()[0] not in ("*", "P", "V"):
+                        continue # Add only Epochs and Position or Velocity records from subsequent files
+                    if i==0 and not first_epoch and line.strip()[0] == "*":
+                        first_epoch = True
+                        # Add line noting splice
+                        out_file.write(f"/* Spliced by TomoSAR v{version[:5]} from {len(eph_files)} files\n")
+                    out_file.write(line)
+        out_file.write("EOF\n")
+    print("done.")
 
+    return merged_file
 
-    # Get .CLK files
-    clk_files = [f for f in eph_files if f.suffix in (".CLK", ".clk")]
-    # Merge
-    merged_clk = perform_merge(clk_files)
+def splice_clk(clk_files: list[Path], output_dir: Path, force: bool = False) -> Path:
+    """
+    Splice multiple RINEX CLK files into one, preserving the header and data integrity.
+    """
+    if len(clk_files) == 1:
+        merged_file = shutil.copy2(clk_files[0], output_dir)
+        return merged_file
+   
+    clk_files.sort()
+    merged_file, t_start, t_end = _generate_merged_filenames(clk_files, output_dir=output_dir)
+    if not merged_file:
+        return None
+    if merged_file.exists() and not force:
+        print(f"Discovered merged file {local(merged_file)}. Aborting merge of CLK files.")
+    print(f"Merging CLK files > {local(merged_file)} ...", end=" ", flush=True)
+    # Write spliced file
+    with merged_file.open("w", encoding="utf-8") as out_file:
+        for i, file_path in enumerate(clk_files):
+            with file_path.open("r", encoding="utf-8") as in_file:
+                end_of_header = False
+                for line in in_file:
+                    if i==0 and "PGM / RUN BY / DATE" in line:
+                        # Add line noting splice
+                        out_file.write(line)
+                        out_file.write(f"Spliced by TomoSAR v{version[:5]} from {len(clk_files)} files".ljust(60) + "COMMENT".ljust(20) + "\n")
+                        continue
+                    if "END OF HEADER" in line:
+                        end_of_header = True
+                        if i != 0:
+                            continue
+                    if i != 0 and not end_of_header:
+                        continue # Skip headers for subsequent files
+                    out_file.write(line)
+    print("done.")
 
-    return merged_sp3, merged_clk
+def splice_dcb(dcb_files: list[Path], output_dir: Path, force: bool = False) -> Path:
+    """
+    Splice multiple Bias-SINEX files into one, preserving the header and data integrity.
+    """
+    if len(dcb_files) == 1:
+        merged_file = shutil.copy2(dcb_files[0], output_dir)
+        return merged_file
+    
+    dcb_files.sort()
+    merged_file, t_start, t_end = _generate_merged_filenames(dcb_files, output_dir=output_dir)
+    if not merged_file:
+        return None
+    if merged_file.exists() and not force:
+        print(f"Discovered merged file {local(merged_file)}. Aborting merge of Bias-SINEX files.")
+    print(f"Merging Bias-SINEX files > {local(merged_file)} ...", end=" ", flush=True)
+    # Write spliced file
+    with merged_file.open("w", encoding="utf-8") as out_file:
+        for i, file_path in enumerate(dcb_files):
+            with file_path.open("r", encoding="utf-8") as in_file:
+                bias_solution = False
+                for line in in_file:
+                    if i==0 and "%=BIA" in line:
+                        # Subsititute end timestamp
+                        if i==0:
+                            out_file.write(string_sub(line, r'\d{4}:\d{3}:\d{5}', f"{t_end.year:04}:{t_end.timetuple().tm_yday:03}:{3600 * t_end.hour + 60 * t_end.minute + t_end.second:05}", 3))
+                            continue
+                    if i==0 and "CODE'S rapid IAR phase/code OSB results for day" in line:
+                        #  Add line noting splice
+                        if i==0:
+                            out_file.write(line)
+                            out_file.write(f"* Spliced by TomoSAR v{version[:5]} from {len(dcb_files)} files\n")
+                            continue
+                    if "-BIAS/SOLUTION" or "%=ENDBIA" in line:
+                        continue
+                    if "+BIAS/SOLUTION" in line:
+                        bias_solution = True
+                        if i != 0:
+                            continue
+                    if i != 0 and not bias_solution:
+                        continue # Skip other blocks for subsequent files
+                    out_file.write(line)
+        out_file.write("-BIAS/SOLUTION\n")
+        out_file.write("%=ENDBIA\n")
+    print("done.")
+
+def splice_inx(inx_files: list[Path], output_dir: Path, force: bool = False) -> Path:
+    """
+    Splice IONEX files into one, preserving the header and data integrity.
+    """
+    if len(inx_files) == 1:
+        merged_file = shutil.copy2(inx_files[0], output_dir)
+        return merged_file
+    
+    inx_files.sort()
+    merged_file, t_start, t_end = _generate_merged_filenames(inx_files, output_dir=output_dir)
+    if not merged_file:
+        return None
+    if merged_file.exists() and not force:
+        print(f"Discovered merged file {local(merged_file)}. Aborting merge of INX files.")
+    print(f"Merging INX files > {local(merged_file)} ...", end=" ", flush=True)
+    # Write spliced file
+    tec_lines = []
+    rms_lines = []
+    with merged_file.open("w", encoding="utf-8") as out_file:
+        for i, file_path in enumerate(inx_files):
+            with file_path.open("r", encoding="utf-8") as in_file:
+                end_of_header = False
+                aux_data = False
+                tec_data = False
+                rms_data = False
+                for line in in_file:
+                    if i==0 and "PGM / RUN BY / DATE" in line:
+                        # Add line noting splice
+                        out_file.write(line)
+                        out_file.write(f"Spliced by TomoSAR v{version[:5]} from {len(inx_files)} files".ljust(60) + "COMMENT".ljust(20) + "\n")
+                        continue
+                    if i==0 and "EPOCH OF LAST MAP" in line:
+                        # Modify last epoch
+                        out_file.write(f"{t_end.year:>6}{t_end.month:>6}{t_end.day:>6}{t_end.hour:>6}{t_end.minute:>6}{t_end.second:>6}{' '*24}EPOCH OF LAST MAP\n")
+                        continue
+                    if i == 0 and "DIFFERENTIAL CODE BIASES" in line and "START OF AUX DATA" in line:
+                        aux_data = True
+                        out_file.write(line)
+                        out_file.write("Differential code biases are provided in a separate file".ljust(60) + "COMMENT".ljust(20) + "\n")
+                        continue
+                    if "DIFFERENTIAL CODE BIASES" in line and "END OF AUX DATA" in line:
+                        aux_data = False
+                    if aux_data:
+                        continue # Skip AUX DATA for clarity 
+                    if not end_of_header:
+                        if i == 0:
+                            out_file.write(line)
+                        else:
+                            continue # Skip headers for subsequent files
+                    if "END OF HEADER" in line:
+                        end_of_header = True
+                        if i != 0:
+                            continue
+                    if "START OF TEC MAP" in line:
+                        tec_data = True
+                    if "END OF TEC MAP" in line:
+                        tec_lines.append(line)
+                        tec_data = False
+                    if "START OF RMS MAP" in line:
+                        rms_data = True
+                    if "END OF RMS MAP" in line:
+                        rms_data = False
+                        rms_data.append(line)
+                    if tec_data:
+                        tec_lines.append(line)
+                    if rms_data:
+                        rms_lines.append(line)
+        # Write data blocks
+        out_file.writelines(tec_lines)
+        out_file.writelines(rms_lines)
+        out_file.write(f"{' '*60}END OF FILE\n")
+    print("done.")
 
 def ubx2rnx(ubx_file: str|Path, nav: bool = True, sbs: bool = True, obs_file: str|Path|None = None) -> tuple[Path, Path|None, Path|None]:
     """Convert a UBX file (drone gnss_logger_dat-[...].bin file) to RINEX."""
@@ -649,9 +835,9 @@ def _split_by_site_occupation(
         output_path = rnx_file.with_suffix(".obs")
     for idx, (block_lines, position, first_obs, last_obs) in enumerate(blocks):
         # Update header with new position and first and last obs times
-        position_line = f"{position[0]:14.4f}{position[1]:14.4f}{position[2]:14.4f}{" " * 18}APPROX POSITION XYZ\n"
-        first_obs_line = f"{f'{first_obs[0].year:04}':>6}{f'{first_obs[0].month:02}':>6}{f'{first_obs[0].day:02}':>6}{f'{first_obs[0].hour:02}':>6}{f'{first_obs[0].minute:02}':>6}{f'{first_obs[0].second + first_obs[0].microsecond * 1E-6:02.7f}':>13}{first_obs[1]:>8}{" "*9}TIME OF FIRST OBS\n"
-        last_obs_line = f"{f'{last_obs[0].year:04}':>6}{f'{last_obs[0].month:02}':>6}{f'{last_obs[0].day:02}':>6}{f'{last_obs[0].hour:02}':>6}{f'{last_obs[0].minute:02}':>6}{f'{last_obs[0].second + last_obs[0].microsecond * 1E-6:02.7f}':>13}{last_obs[1]:>8}{" "*9}TIME OF LAST OBS\n"
+        position_line = f"{position[0]:14.4f}{position[1]:14.4f}{position[2]:14.4f}{' ' * 18}APPROX POSITION XYZ\n"
+        first_obs_line = f"{f'{first_obs[0].year:04}':>6}{f'{first_obs[0].month:02}':>6}{f'{first_obs[0].day:02}':>6}{f'{first_obs[0].hour:02}':>6}{f'{first_obs[0].minute:02}':>6}{f'{first_obs[0].second + first_obs[0].microsecond * 1E-6:02.7f}':>13}{first_obs[1]:>8}{' '*9}TIME OF FIRST OBS\n"
+        last_obs_line = f"{f'{last_obs[0].year:04}':>6}{f'{last_obs[0].month:02}':>6}{f'{last_obs[0].day:02}':>6}{f'{last_obs[0].hour:02}':>6}{f'{last_obs[0].minute:02}':>6}{f'{last_obs[0].second + last_obs[0].microsecond * 1E-6:02.7f}':>13}{last_obs[1]:>8}{' '*9}TIME OF LAST OBS\n"
         for i, line in enumerate(header):
             if "APPROX POSITION XYZ" in line:
                 header[i] = position_line
@@ -737,7 +923,7 @@ def reach2rnx(rtcm_file: str|Path, reference_date: datetime|None = None, obs_fil
             if verbose or Settings().VERBOSE:
                 print(f"{obs_path} generated the following corrected RINEX OBS file(s):")
                 for file in obs_files:
-                    print(f"{" "*2}{file}")
+                    print(f"{' '*2}{file}")
         else:
             obs_files = None
 
@@ -968,6 +1154,7 @@ def ppp(
         obs_file: str|Path,
         sp3_file: str|Path,
         clk_file: str|Path|None = None,
+        inx_file: str|Path|None = None,
         out_path: str|Path|None = None,
         navglo_file: str|Path = None,
         atx_file: str|Path = None,
@@ -1020,6 +1207,8 @@ def ppp(
                 cmd.extend(["-input:navglo", navglo_file])
             if receiver:
                 cmd.extend(["-input:antrec", receiver])
+            if inx_file:
+                cmd.extend(["-input:inx", inx_file])
             print(f"Running station PPP on {local(obs_file)}{f' > {local(out_path)}' if out_path else ''} ...", end=" ", flush=True)
             result = run(cmd)
             if out_path:

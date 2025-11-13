@@ -14,7 +14,7 @@ import zipfile
 import shutil
 
 from .utils import prompt_ftp_login, gunzip, ecef2enu, warn, generate_mocoref
-from .binaries import crx2rnx, merge_rnx, merge_eph, ubx2rnx, reach2rnx, rnx2rtkp, ppp, resource, local, tmp, _ant_type, _parse_atx
+from .binaries import crx2rnx, merge_rnx, ubx2rnx, reach2rnx, rnx2rtkp, ppp, resource, local, tmp, _ant_type, _parse_atx, splice_sp3, splice_clk, splice_dcb, splice_inx
 from .config import Settings
 from .transformers import ecef_to_geo
 
@@ -111,7 +111,7 @@ def find_station(rover_pos, stations_path: str|Path = None):
         df = pd.read_csv(f, encoding='utf-8-sig')
 
     # Define Euclidean distance
-    def euclidean_distance(x1, y1, z1, x2, y2, z2):
+    def euclidean_distance(x1: float, y1: float, z1: float, x2: float, y2: float, z2: float) -> float:
         return math.sqrt((x1 - x2)**2 + (y1 - y2)**2 + (z1 - z2)**2)
 
     flight_x, flight_y, flight_z = rover_pos
@@ -137,7 +137,7 @@ def fetch_swepos_files(
     fetch_nav: bool = False,
     max_workers: int = 10,
     max_retries: int = 3
-):
+) -> tuple[list[Path], int]:
 
     # Log into FTP server
     settings = Settings()
@@ -208,7 +208,7 @@ def fetch_swepos_files(
             print(f"  {filename}")
         return
 
-    def download_file(file_info):
+    def download_file(file_info: tuple[str, str, Path]) -> tuple[str, bool]:
         ftp_path, filename, local_path = file_info
         for attempt in range(1, max_retries + 1):
             try:
@@ -226,6 +226,7 @@ def fetch_swepos_files(
 
     # Download with progress bar
     failed = 0
+    downloaded_files = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(download_file, fi): fi[1] for fi in files_to_download}
         with tqdm(total=len(futures), desc="Downloading SWEPOS files") as pbar:
@@ -239,50 +240,69 @@ def fetch_swepos_files(
                         rnx_path = crx2rnx(decompressed_path)
                         if not rnx_path.is_file():
                             raise FileNotFoundError(f"Unpacking of Hatanaka compressed .crx file {decompressed_path} unsuccessful")
+                        downloaded_files.append(rnx_path)
+                    else:
+                        downloaded_files.append(decompressed_path)
                 else:
                     tqdm.write(f"Failed: {filename}")
                     failed += 1
                 pbar.update(1)
 
-    return failed
+    return downloaded_files, failed
 
-def merge_swepos_rinex(data_dir: str|Path) -> tuple[Path|None, Path|None]:
-    data_path = Path(data_dir)
-    obs_files = sorted(data_path.glob("*O.rnx"))
-    nav_files = sorted(data_path.glob("*N.rnx"))
+def merge_swepos_rinex(files: list[str|Path], output_dir: Path) -> tuple[Path|None, Path|None]:
+    obs_files = []
+    nav_files = []
+    for f in files:
+        match f.with_suffix("").name[-1].upper():
+            case "O":
+                obs_files.append(f)
+            case "N":
+                nav_files.append(f)
 
     # Merge rinex files    
-    if obs_files:
-        merged_obs = merge_rnx(obs_files, force=True, output_dir=data_path.parent)
-    else:
-        merged_obs = None
-
-    if nav_files:
-        merged_nav = merge_rnx(nav_files, force=True, output_dir=data_path.parent)
-    else:
-        merged_nav = None
+    merged_obs = merge_rnx(obs_files, force=True, output_dir=output_dir)
+    merged_nav = merge_rnx(nav_files, force=True, output_dir=output_dir)
 
     return merged_obs, merged_nav
 
-def merge_ephemeris(data_dir: str|Path, output_dir: Path|str|None = None) -> tuple[Path|None, Path|None]:
-    data_path = Path(data_dir)
-    eph_files = sorted(data_path.rglob("*.SP3"))
-    eph_files.extend(sorted(data_path.rglob("*.CLK")))
+def merge_ephemeris(files: list[Path], output_dir: Path|str|None = None) -> tuple[Path|None, Path|None]:
+    # Divide files after type
+    sp3_files = []
+    clk_files = []
+    inx_files = []
+    for f in files:
+        match f.suffix.upper():
+            case ".SP3":
+                sp3_files.append(f)
+            case ".CLK":
+                clk_files.append(f)
+            case ".INX":
+                inx_files.append(f)
+    
+    merged_sp3 = splice_sp3(sp3_files, output_dir=output_dir)
+    merged_clk = splice_clk(clk_files, output_dir=output_dir)
+    merged_inx = splice_inx(inx_files, output_dir=output_dir)
 
-    if eph_files:
-        merged_sp3, merged_clk = merge_eph(eph_files, force=True, output_dir=output_dir)
-        return merged_sp3, merged_clk
-    else:
-        return None, None
+    return merged_sp3, merged_clk, merged_inx
 
-def fetch_sp3_clk(
+def fetch_cod_files(
     start_time: datetime,
     end_time: datetime,
     output_dir: str|Path,
+    ignore_files: str|set = set(),
     dry: bool = False,
     max_workers: int = 10,
     max_retries: int = 3
-) -> int:
+) -> tuple[list[Path], int]:
+    """Accesses the GSSC lake at gssc.esa.int to find CODE SP3 ORB files, CLK files, and IONEX files
+    covering the time from start_time to end_time. The parameter ignore_files can contain the following strings:
+    - "SP3": do not download SP3 ORB files
+    - "CLK": do not download CLK files
+    - "INX": do not download IONEX files
+    
+    :return downloaded_files: list of pathlib.Path objects pointing to downloaded files
+    :return failed: number of failed downloads"""
     ftp, ftp_user, ftp_pass = prompt_ftp_login('gssc.esa.int', max_attempts=max_retries, anonymous=True)
 
     # Prepare output directory
@@ -290,10 +310,10 @@ def fetch_sp3_clk(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Ensure start time is at least 6 hours before start
-    start_time = start_time - timedelta(hours=6)
+    # start_time = start_time - timedelta(hours=6)
     start_time = start_time.date()
     # Ensure end time is at least 6 hours after end
-    end_time = end_time + timedelta(hours=6)
+    # end_time = end_time + timedelta(hours=6)
     end_time = end_time.date()
 
     # Collect files to download
@@ -304,46 +324,53 @@ def fetch_sp3_clk(
         doy = current.timetuple().tm_yday
         ftp_path = f"/gnss/products/{gps_week}/"
 
+        # Look for Ephemeris files
         try:
             ftp.cwd(ftp_path)
             files = ftp.nlst()
-            # Find MGEX .sp3 file for the correct day
-            target_name = f"COD0MGXFIN_{current.year}{doy}0000_01D_05M_ORB.SP3.gz"
-            match = next((f for f in files if f == target_name), None)
-
-            if not match:
-                target_name = f"GFZ0MGXRAP_{current.year}{doy}0000_01D_05M_ORB.SP3.gz"
+            if "SP3" not in ignore_files:
+                # Find COD MGEX .SP3 file
+                target_name = f"COD0MGXFIN_{current.year}{doy}0000_01D_05M_ORB.SP3.gz"
                 match = next((f for f in files if f == target_name), None)
-                if not match:
-                    target_name = f"IAC0MGXFIN_{current.year}{doy}0000_01D_05M_ORB.SP3.gz"
-                    match = next((f for f in files if f == target_name), None)
-
-            if match:
-                local_path = output_dir / match
-                files_to_download.append((ftp_path, match, local_path))
-            else:
-                print(f"Could not find .sp3 file for {current}.")
+                if match:
+                    local_path = output_dir / match
+                    files_to_download.append((ftp_path, match, local_path))
+                else:
+                    warn(f"Could not find SP3 orbit file for {current}.")
             
-            # Find MGEX .clk file for the correct day
-            target_name = f"COD0MGXFIN_{current.year}{doy}0000_01D_30S_CLK.CLK.gz"
-            match = next((f for f in files if f == target_name), None)
-
-            if not match:
-                target_name = f"GFZ0MGXRAP_{current.year}{doy}0000_01D_30S_CLK.CLK.gz"
+            if "CLK" not in ignore_files:
+                # Find COD MGEX .CLK
+                target_name = f"COD0MGXFIN_{current.year}{doy}0000_01D_30S_CLK.CLK.gz"
                 match = next((f for f in files if f == target_name), None)
-                if not match:
-                    target_name = f"IAC0MGXFIN_{current.year}{doy}0000_01D_30S_CLK.CLK.gz"
-                    match = next((f for f in files if f == target_name), None)
-                    
-            if match:
-                local_path = output_dir / match
-                files_to_download.append((ftp_path, match, local_path))
-            else:
-                print(f"Could not find .clk file for {current} –– {ftp_path}: {current.year}{doy}")
+                if match:
+                    local_path = output_dir / match
+                    files_to_download.append((ftp_path, match, local_path))
+                else:
+                    warn(f"Could not find CLK file for {current} –– {ftp_path}: {current.year}{doy}")
 
-            current += timedelta(days=1)
         except Exception as e:
-            print(f"Could not access {ftp_path}: {e}")
+            warn(f"Could not access {ftp_path}: {e}")
+        
+        # Look for IONEX file
+        if "INX" not in ignore_files:
+            ftp_path = f"/gnss/products/ionex/{current.year}/{doy}"
+            try:
+                ftp.cwd(ftp_path)
+                files = ftp.nlst()
+
+                # Find COD INX file
+                target_name = f"COD0OPSRAP_{current.year}{doy}0000_01D_01H_GIM.INX.gz"
+                match = next((f for f in files if f == target_name), None)
+                
+                if match:
+                    local_path = output_dir / match
+                    files_to_download.append((ftp_path, match, local_path))
+                else:
+                    warn(f"Could not find IONEX file for {current} –– {ftp_path}: {current.year}{doy}")
+            except Exception as e:
+                warn(f"Could not access {ftp_path}: {e}")
+            
+        current += timedelta(days=1)
 
     ftp.quit()
 
@@ -371,6 +398,7 @@ def fetch_sp3_clk(
         return filename, False
     
     # Download with progress bar
+    downloaded_files = []
     failed = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(download_file, fi): fi[1] for fi in files_to_download}
@@ -379,13 +407,13 @@ def fetch_sp3_clk(
                 filename, success = future.result()
                 if success:
                     tqdm.write(f"Downloaded: {filename}")
-                    gunzip(output_dir / filename)
+                    downloaded_files.append(gunzip(output_dir / filename))
                 else:
                     tqdm.write(f"Failed: {filename}")
                     failed += 1
                 pbar.update(1)
     
-    return failed
+    return downloaded_files, failed
 
 def date_to_gps_week(input_date: datetime) -> int:
     gps_start = date(1980, 1, 6)  # GPS epoch
@@ -532,37 +560,42 @@ def read_glab_out(input: str|Path, verbose: bool = False) -> tuple[np.ndarray,
 
     return mean, rotation,  idx, diff, np.asarray((x_res, y_res, z_res))
 
-def modify_config(config_path: Path, standard: bool = False, precise: bool = False, raw: bool = False) -> None:
+def modify_config(
+        config_path: Path,
+        standard: bool = False,
+        precise: bool = False,
+        raw: bool = False,
+        ionofile: Path|str|None = None
+    ) -> None:
     """
     Modifies an existing RTKLIB config file to enable precise ephemeris mode
     and sets the paths to SP3 and CLK files.
 
-    Parameters:
-    - config_path: Path to the existing config file
-    - sp3_path: Path to the SP3 file
-    - clk_path: Path to the CLK file
-    - output_path: Path to save the modified config file
+    :param standard: disable Explorer specific option
+    :param precise: enable precise ephemeris mode
+    :param raw: disable all internal TomoSAR functions and run raw
+    :param ionofile: path to Ionosphere map file
     """
-
-    if not (standard or precise or raw ):
-        warn("Running modify_config with standard=False, precise=False and raw=False has no effect.")
-        return
     
     # Read the original config file
     with open(config_path, 'r') as file:
         lines = file.readlines()
 
+    # Flags to check if the required field is found
     if precise:
-        # Flag to check if the required field is found
         sateph_found = False
+    if ionofile:
+        iono_found = False
     
+    # Pattern to find files that have been added beforehand
     if raw:
         pattern = re.compile(r"/.+\n")
+    
 
     # Modify the relevant lines
     for i, line in enumerate(lines):
+        # Modify fields if found
         if precise:
-            # Modify required field if found
             if line.strip().startswith('pos1-sateph'):
                 lines[i] = 'pos1-sateph        =1\n'
                 sateph_found = True
@@ -573,11 +606,18 @@ def modify_config(config_path: Path, standard: bool = False, precise: bool = Fal
         if raw:
             # Remove internal resources
             lines[i] = pattern.sub('\n', line)
-    
-    if precise:
-        # Append missing fields if not found
-        if not sateph_found:
-            lines.append('pos1-sateph =1\n')
+        if ionofile:
+            if line.strip().startswith('file-ionofile'):
+                lines[i] = f'file-ionofile      ={ionofile}\n'
+                iono_found = True
+
+    # Append missing fields if not found
+    if precise and not sateph_found:
+        lines.append('pos1-sateph        =1\n')
+
+    if ionofile and not iono_found:
+        lines.append(f'file-ionofile      ={ionofile}\n')
+
 
     # Write the modified config to the output file
     with open(config_path, 'w') as file:
@@ -593,6 +633,7 @@ def rtkp(
         sp3_file: str|Path|None = None,
         precise: bool = False,
         clk_file: str|Path|None = None,
+        inx_file: str|Path|None = None,
         elevation_mask: float|None = None,
         mocoref_file: str|Path = None,
         mocoref_type: str|None = None,
@@ -639,6 +680,32 @@ def rtkp(
     if not nav_file.is_file():
         raise FileNotFoundError(f"NAV file not found: {nav_file}")
 
+    # Check which ephemeris files were provided
+    eph_files = set()
+    if sp3_file:
+        sp3_file = Path(sp3_file)
+        if sp3_file.is_file():
+            eph_files.add("SP3")
+            # If no CLK file is provided: assume SP3 file contains clock corrections as well
+            if not clk_file:
+                eph_files.add("CLK") 
+        else:
+            warn(f"User provided SP3 file {sp3_file} not found, ignoring")
+            sp3_file = None
+    if clk_file:
+        clk_file = Path(clk_file)
+        if clk_file.is_file():
+            eph_files.add("CLK")
+        else:
+            warn(f"User provided CLK file {clk_file} not found, ignoring")
+            clk_file = None
+    if inx_file:
+        inx_file = Path(inx_file)
+        if inx_file.is_file():
+            eph_files.add("INX")
+        else:
+            warn(f"User provided IONEX file {inx_file} not found, ignoring")
+            inx_file = None
 
     if out_path:
         out_path = Path(out_path)
@@ -651,9 +718,12 @@ def rtkp(
     else:
         output_dir = rover_obs.parent
 
-    antenna_type, radome = _ant_type(base_obs)
-    print(f"Detected base antenna type: {antenna_type} {radome}")
-    if not raw:
+    
+    if raw:
+        print("Running raw RTKLIB rnx2rtkp ...")
+    else:
+        antenna_type, radome = _ant_type(base_obs)
+        print(f"Detected base antenna type: {antenna_type} {radome}")
         with resource(None, "SATELLITES") as atx:
             with resource(None, "RECEIVER", antenna=antenna_type, radome=radome) as receiver:
                 if receiver is None:
@@ -685,15 +755,20 @@ def rtkp(
                 freqs = ""
             if sp3_file or precise:
                 # Modify to precise pos1-eph mode
-                modify_config(config, precise=True)
-                if not sp3_file:
+                if not eph_files == {"SP3", "CLK", "INX"}:
                     start_utc, end_utc, _, _ = extract_rnx_info(base_obs)
+                    downloaded_files, failed = fetch_cod_files(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, ignore_files=eph_files, max_workers=max_downloads, max_retries=max_retries, dry=dry)
+                    if failed:
+                        warn(f"Failed to download {failed} files from GSSC lake (see above).")
+                    
+                    merged_sp3_file, merged_clk_file, merged_inx_file = merge_ephemeris(downloaded_files, output_dir=output_dir if retain else tmp_dir)
                     if not sp3_file:
-                        failed = fetch_sp3_clk(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, max_workers=max_downloads, max_retries=max_retries, dry=dry)
-                        if failed:
-                            raise FileNotFoundError("Download of precise ephemeris and clock data from ESA failed.")
-                        
-                        sp3_file, clk_file = merge_ephemeris(tmp_dir, output_dir=output_dir if retain else tmp_dir)
+                        sp3_file = merged_sp3_file
+                    if not clk_file:
+                        clk_file = merged_clk_file
+                    if not inx_file:
+                        inx_file = merged_inx_file
+                modify_config(config, precise=True, ionofile=inx_file)
             if dry:
                 return
             try:
@@ -943,7 +1018,7 @@ def fetch_swepos(
 
         print("Logging into Swepos network ...", flush=True)
         with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
-            failed = fetch_swepos_files(
+            downloaded_files, failed = fetch_swepos_files(
                 station_code=station_code,
                 start_time=start_utc,
                 end_time=end_utc,
@@ -955,9 +1030,9 @@ def fetch_swepos(
                 fetch_nav=fetch_nav
             )
             if failed:
-                    raise FileNotFoundError("Download from Swepos failed.")
+                raise FileNotFoundError("Download from Swepos failed (see above).")
 
-            merged_obs, merged_nav = merge_swepos_rinex(tmp_dir)
+            merged_obs, merged_nav = merge_swepos_rinex(downloaded_files, output_dir=output_dir )
 
         if not merged_obs.is_file():
             raise FileNotFoundError(f"Generated OBS file: {merged_obs} not found")
@@ -976,6 +1051,8 @@ def station_ppp(
         antrec_path: str|Path|None = None,
         sp3_file: str|Path|None = None,
         clk_file: str|Path|None = None,
+        dcb_file: str|Path|None = None,
+        inx_file: str|Path|None = None,
         max_downloads: int = 10,
         max_retries: int = 3,
         out_path: str|Path|None = None,
@@ -1013,6 +1090,33 @@ def station_ppp(
     if not obs_path.is_file():
         raise FileNotFoundError(f"Rinex observation file not found: {obs_path}")
 
+    # Check which ephemeris files were provided
+    eph_files = set()
+    if sp3_file:
+        sp3_file = Path(sp3_file)
+        if sp3_file.is_file():
+            eph_files.add("SP3")
+            # If no CLK file is provided: assume SP3 file contains clock corrections as well
+            if not clk_file:
+                eph_files.add("CLK") 
+        else:
+            warn(f"User provided SP3 file {sp3_file} not found, ignoring")
+            sp3_file = None
+    if clk_file:
+        clk_file = Path(clk_file)
+        if clk_file.is_file():
+            eph_files.add("CLK")
+        else:
+            warn(f"User provided CLK file {clk_file} not found, ignoring")
+            clk_file = None
+    if inx_file:
+        inx_file = Path(inx_file)
+        if inx_file.is_file():
+            eph_files.add("INX")
+        else:
+            warn(f"User provided IONEX file {inx_file} not found, ignoring")
+            inx_file = None
+    
     if out_path:
         out_path = Path(out_path)
         if out_path.is_dir():
@@ -1026,16 +1130,18 @@ def station_ppp(
 
     start_utc, end_utc, approx_pos, antenna_delta = extract_rnx_info(obs_path)
     with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
-        if not sp3_file:
-            failed = fetch_sp3_clk(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, max_workers=max_downloads, max_retries=max_retries, dry=dry)
+        if not eph_files == {"SP3", "CLK", "INX"}:
+            downloaded_files, failed = fetch_cod_files(start_time=start_utc, end_time=end_utc, output_dir=tmp_dir, ignore_files=eph_files, max_workers=max_downloads, max_retries=max_retries, dry=dry)
             if failed:
-                raise FileNotFoundError("Download of precise ephemeris and clock data from ESA failed.")
+                warn("Download of precise ephemeris and clock data from ESA failed.")
             
-            sp3_file, clk_file = merge_ephemeris(tmp_dir)
-            if retain:
-                # Move files out of temporary directory
-                sp3_file = shutil.move(sp3_file, output_dir)
-                clk_file = shutil.move(clk_file, output_dir)
+            merged_sp3_file, merged_clk_file, merged_inx_file = merge_ephemeris(downloaded_files, output_dir=output_dir)
+            if not sp3_file:
+                sp3_file = merged_sp3_file
+            if not clk_file:
+                clk_file = merged_clk_file
+            if not inx_file:
+                inx_file = merged_inx_file
 
         # Run PPP command
         out = ""
@@ -1044,6 +1150,7 @@ def station_ppp(
             obs_file=obs_path,
             sp3_file=sp3_file,
             clk_file=clk_file,
+            inx_file=inx_file,
             out_path=out_path,
             navglo_file=navglo_path,
             atx_file=atx_path,
