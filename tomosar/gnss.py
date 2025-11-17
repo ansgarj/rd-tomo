@@ -11,7 +11,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import re
 import zipfile
-import shutil
 
 from .utils import prompt_ftp_login, gunzip, ecef2enu, warn, generate_mocoref
 from .binaries import crx2rnx, merge_rnx, ubx2rnx, reach2rnx, rnx2rtkp, ppp, resource, local, tmp, _ant_type, _parse_atx, splice_sp3, splice_clk, splice_dcb, splice_inx
@@ -638,6 +637,7 @@ def rtkp(
         mocoref_file: str|Path = None,
         mocoref_type: str|None = None,
         mocoref_line: int = 1,
+        download_dir: str|Path|None = None,
         max_downloads: int = 10,
         max_retries: int = 3,
         dry: bool = False,
@@ -716,7 +716,9 @@ def rtkp(
             output_dir = out_path.parent
             output_dir.mkdir(exist_ok=True, parents=True)
     else:
-        output_dir = rover_obs.parent
+        output_dir = base_obs.parent
+    if download_dir:
+        output_dir = Path(download_dir)
 
     
     if raw:
@@ -746,7 +748,7 @@ def rtkp(
                 else:
                     warn("No callibration data available. Using all constellations and frequencies.")
     
-    print(f"Running RTKP post processing ...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: {local(nav_file)}\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}-->Out: {local(out_path)}", flush=True)
+    print(f"Running RTKP post processing {'in precise mode ' if precise else 'with broadcast data '}...\n   Rover: {local(rover_obs)}\n   Base: {local(base_obs)}\n   Nav: {local(nav_file)}\n{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}{f'   INX: {local(inx_file)}\n' if inx_file else ''}{f'-->Out: {local(out_path)}' if out_path else ''}", flush=True)
     with resource(config_file, "RTKP_CONFIG", antenna=antenna_type, radome=radome) as config:
         with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
             if raw:
@@ -1051,8 +1053,8 @@ def station_ppp(
         antrec_path: str|Path|None = None,
         sp3_file: str|Path|None = None,
         clk_file: str|Path|None = None,
-        dcb_file: str|Path|None = None,
         inx_file: str|Path|None = None,
+        download_dir: str|Path|None = None,
         max_downloads: int = 10,
         max_retries: int = 3,
         out_path: str|Path|None = None,
@@ -1080,11 +1082,7 @@ def station_ppp(
     Output:
     - Base position
     - Rotation matrix from ECEF to local ENU at base position
-    - Distance from header position to base position
-    OR if retain:
-    - Base postion
-    - SP3 file path
-    - CLK file path"""
+    - Tuple with (SP3 file path, CLK file path, INX file path) if retain or (None, None, None) otherwise"""
 
     obs_path = Path(obs_path)
     if not obs_path.is_file():
@@ -1127,7 +1125,10 @@ def station_ppp(
             output_dir.mkdir(exist_ok=True, parents=True)
     else:
         output_dir = obs_path.parent
+    if download_dir:
+        output_dir = Path(download_dir)
 
+    print(f"Running station PPP ...\n{f'   Station: {local(obs_path)}\n'}{f'   Navglo: {local(navglo_path)}\n' if navglo_path else ''}{f'   SP3: {local(sp3_file)}\n' if sp3_file else ''}{f'   CLK: {local(clk_file)}\n' if clk_file else ''}{f'   INX: {local(inx_file)}\n' if inx_file else ''}{f'   ATX: {local(atx_path)}\n' if atx_path else ''}{f'   Receiver: {local(antrec_path)}\n' if antrec_path else ''}{f'-->Out: {local(out_path)}' if out_path else ''}", flush=True)
     start_utc, end_utc, approx_pos, antenna_delta = extract_rnx_info(obs_path)
     with tmp(output_dir / "tmp", allow_dir=True) as tmp_dir:
         if not eph_files == {"SP3", "CLK", "INX"}:
@@ -1168,7 +1169,7 @@ def station_ppp(
 
     # Compare against header
     diff = rotation @ [pos[0] - approx_pos[0], pos[1] - approx_pos[1], pos[2] - approx_pos[2]]
-    distance = math.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
+    distance = math.sqrt((diff**2).sum())
     print(f"Distance from header position: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
     
     if header:
@@ -1185,9 +1186,8 @@ def station_ppp(
         generate_mocoref(mocoref, generate=True)
     
     if retain:
-        # Return only pos along with SP3 and CLK file
-        return pos, sp3_file, clk_file
-    return pos, rotation, distance
+        return pos, rotation, (sp3_file, clk_file, inx_file)
+    return pos, rotation, (None, None, None)
 
 def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_dir: str|Path|None = None, rnx_file: Path|str|None = None, nav: bool = False, verbose: bool = False) -> tuple[dict[Path, dict], tuple[Path|None, Path|None, Path|None]]:
     """Extracts a Reach .zip archive to produce:
@@ -1233,7 +1233,7 @@ def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_d
         output_dir = archive.parent
 
     obs_file = output_dir / (base_name + ".obs")
-
+    print(f"Converting {local(archive)} ...\n-->{local(obs_file)}\n{f'-->{local(obs_file.with_suffix(".nav"))}\n' if nav else ''}-->{local(output_dir / "mocoref.moco")}", flush=True)
     with zipfile.ZipFile(archive, 'r') as zip_ref:
         def extract_to(source: Path, destination: Path, final_destination: Path|None = None) -> None:
             if not final_destination:
@@ -1274,7 +1274,7 @@ def reachz2rnx(archive: Path|str, reference_date: datetime|None = None, output_d
         
         # Extract mocoref.moco
         if llh_file:
-            # Update stard and end timestamps to match the OBS file
+            # Update start and end timestamps to match the OBS file
             start = obs_data[obs_file]["TIME OF FIRST OBS"]
             end = obs_data[obs_file]["TIME OF LAST OBS"]
 

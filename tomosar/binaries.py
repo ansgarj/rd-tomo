@@ -7,9 +7,8 @@ import subprocess
 from pathlib import Path
 import json
 from importlib.resources import path as importpath
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from typing import Iterator
-from contextlib import ExitStack
 import rasterio
 from rasterio.io import DatasetReader
 from xml.etree import ElementTree as ET
@@ -458,8 +457,10 @@ def _generate_merged_filenames(files: list[Path], output_dir: Path|str|None = No
 
 def merge_rnx(rnx_files: list[str|Path], force: bool = False, output_dir: Path|str|None = None) -> Path|None:
     if len(rnx_files) == 1:
-        merged_file = shutil.copy2(rnx_files[0], output_dir)
-        return merged_file
+        if rnx_files[0] == output_dir / rnx_files[0]:
+            return rnx_files[0]
+        return shutil.copy2(rnx_files[0], output_dir)
+    
     merged_file, t_start, t_end = _generate_merged_filenames(rnx_files, output_dir=output_dir)
     if not merged_file:
         return None
@@ -474,8 +475,9 @@ def merge_rnx(rnx_files: list[str|Path], force: bool = False, output_dir: Path|s
 def splice_sp3(eph_files: list[Path], force: bool = False, output_dir: Path|str|None = None) -> tuple[Path|None, Path|None]:
     """Splice multiple SP3 files into one, preserving header and data integrity"""
     if len(eph_files) == 1:
-        merged_file = shutil.copy2(eph_files[0], output_dir)
-        return merged_file
+        if eph_files[0] == output_dir / eph_files[0].name:
+            return eph_files[0]
+        return shutil.copy2(eph_files[0], output_dir)
     
     eph_files.sort()
     merged_file, t_start, t_end = _generate_merged_filenames(eph_files, output_dir=output_dir)
@@ -509,8 +511,9 @@ def splice_clk(clk_files: list[Path], output_dir: Path, force: bool = False) -> 
     Splice multiple RINEX CLK files into one, preserving the header and data integrity.
     """
     if len(clk_files) == 1:
-        merged_file = shutil.copy2(clk_files[0], output_dir)
-        return merged_file
+        if clk_files[0] == output_dir / clk_files[0].name:
+            return clk_files[0]
+        return shutil.copy2(clk_files[0], output_dir)
    
     clk_files.sort()
     merged_file, t_start, t_end = _generate_merged_filenames(clk_files, output_dir=output_dir)
@@ -544,8 +547,9 @@ def splice_dcb(dcb_files: list[Path], output_dir: Path, force: bool = False) -> 
     Splice multiple Bias-SINEX files into one, preserving the header and data integrity.
     """
     if len(dcb_files) == 1:
-        merged_file = shutil.copy2(dcb_files[0], output_dir)
-        return merged_file
+        if dcb_files[0] == output_dir / dcb_files[0].name:
+            return dcb_files[0]
+        return shutil.copy2(dcb_files[0], output_dir)
     
     dcb_files.sort()
     merged_file, t_start, t_end = _generate_merged_filenames(dcb_files, output_dir=output_dir)
@@ -589,8 +593,9 @@ def splice_inx(inx_files: list[Path], output_dir: Path, force: bool = False) -> 
     Splice IONEX files into one, preserving the header and data integrity.
     """
     if len(inx_files) == 1:
-        merged_file = shutil.copy2(inx_files[0], output_dir)
-        return merged_file
+        if inx_files[0] == output_dir / inx_files[0].name:
+            return inx_files[0]
+        return shutil.copy2(inx_files[0], output_dir)
     
     inx_files.sort()
     merged_file, t_start, t_end = _generate_merged_filenames(inx_files, output_dir=output_dir)
@@ -606,7 +611,6 @@ def splice_inx(inx_files: list[Path], output_dir: Path, force: bool = False) -> 
         for i, file_path in enumerate(inx_files):
             with file_path.open("r", encoding="utf-8") as in_file:
                 end_of_header = False
-                aux_data = False
                 tec_data = False
                 rms_data = False
                 for line in in_file:
@@ -619,15 +623,6 @@ def splice_inx(inx_files: list[Path], output_dir: Path, force: bool = False) -> 
                         # Modify last epoch
                         out_file.write(f"{t_end.year:>6}{t_end.month:>6}{t_end.day:>6}{t_end.hour:>6}{t_end.minute:>6}{t_end.second:>6}{' '*24}EPOCH OF LAST MAP\n")
                         continue
-                    if i == 0 and "DIFFERENTIAL CODE BIASES" in line and "START OF AUX DATA" in line:
-                        aux_data = True
-                        out_file.write(line)
-                        out_file.write("Differential code biases are provided in a separate file".ljust(60) + "COMMENT".ljust(20) + "\n")
-                        continue
-                    if "DIFFERENTIAL CODE BIASES" in line and "END OF AUX DATA" in line:
-                        aux_data = False
-                    if aux_data:
-                        continue # Skip AUX DATA for clarity 
                     if not end_of_header:
                         if i == 0:
                             out_file.write(line)
@@ -676,12 +671,7 @@ def ubx2rnx(ubx_file: str|Path, nav: bool = True, sbs: bool = True, obs_file: st
     else:
         sbs_path = None
     cmd.append(ubx_file)
-    print(f"Converting {local(ubx_file)} > {local(obs_path)}", end="")
-    if nav:
-        print(f", {local(nav_path)}", end="")
-    if sbs:
-        print(f", {local(sbs_path)}", end="")
-    print()
+    print(f"Converting {local(ubx_file)} ...\n-->{local(obs_path)}\n{f'-->{local(nav_path)}\n' if nav else ''}{f'-->{local(sbs_path)}\n' if sbs else ''}", end="")
     run(cmd)
 
     return obs_path, nav_path, sbs_path
@@ -897,6 +887,7 @@ def reach2rnx(rtcm_file: str|Path, reference_date: datetime|None = None, obs_fil
         else:
             raise ValueError(f"Could not determine a reference timestamp from the file name ({rtcm_file.name}). Please provide it explicitly.")
 
+    print(f'Converting {local(rtcm_file)} with reference date {reference_date.strftime('%Y/%m/%d')} {reference_date.strftime('%H:%M:%S')}...\n-->{local(obs_path)}\n{f'-->{local(nav_path)}\n' if nav else ''}{f'-->{local(sbs_path)}\n' if sbs else ''}')
     with tmp(rtcm_file.with_name(rtcm_file.stem + "_OBS.tmp")) as obs_path:
         cmd = ["convbin", "-r", "rtcm3", "-od", "-os", '-tr', reference_date.strftime('%Y/%m/%d'), reference_date.strftime('%H:%M:%S'), "-o", obs_path]
         if nav:
@@ -910,12 +901,6 @@ def reach2rnx(rtcm_file: str|Path, reference_date: datetime|None = None, obs_fil
         else:
             sbs_path = None
         cmd.append(rtcm_file)
-        print(f"Converting {local(rtcm_file)} > {local(obs_path)}", end="")
-        if nav:
-            print(f", {local(nav_path)}", end="")
-        if sbs:
-            print(f", {local(sbs_path)}", end="")
-        print()
         run(cmd)
         if obs_path.exists():
             _update_antenna(obs_path, antenna="EML_REACH_RS3", radome="NONE", verbose=verbose)
@@ -935,6 +920,7 @@ def chc2rnx(hcn_file: str|Path, nav: bool = False, sbs: bool = False, obs_file: 
         obs_path = Path(obs_file)
     else:
         obs_path = hcn_file.with_suffix(".obs")
+    print(f"Converting {local(hcn_file)} ...\n-->{local(obs_path)}\n{f'-->{local(nav_path)}\n' if nav else ''}{f'-->{local(sbs_path)}\n' if sbs else ''}", end="")
     cmd = ["convbin", "-r", "nov", "-od", "-os", "-o", obs_path]
     if nav:
         nav_path = obs_path.with_suffix(".nav")
@@ -947,12 +933,6 @@ def chc2rnx(hcn_file: str|Path, nav: bool = False, sbs: bool = False, obs_file: 
     else:
         sbs_path = None
     cmd.append(hcn_file)
-    print(f"Converting {local(hcn_file)} > {local(obs_path)}")
-    if nav:
-            print(f", {local(nav_path)}", end="")
-    if sbs:
-        print(f", {local(sbs_path)}", end="")
-    print()
     run(cmd)
     if obs_path.exists():
         _update_antenna(obs_path, antenna="CHCI83", radome="NONE")
@@ -1193,7 +1173,7 @@ def ppp(
                 cmd.extend(['-pre:elevation', elevation_mask])
             freqs, unavailable, fallback = _parse_atx(receiver_file, antenna_type=antenna_type, radome=radome, mode="glab")
             if fallback:
-                print("Defaulted to NONE radome ...")
+                print("Defaulted to NONE radome")
             if freqs:
                 print(f"Available frequencies: {freqs}")
                 for f in freqs:
@@ -1209,11 +1189,9 @@ def ppp(
                 cmd.extend(["-input:antrec", receiver])
             if inx_file:
                 cmd.extend(["-input:inx", inx_file])
-            print(f"Running station PPP on {local(obs_file)}{f' > {local(out_path)}' if out_path else ''} ...", end=" ", flush=True)
             result = run(cmd)
             if out_path:
                 out_path.write_text(result.stdout)
-            print("done. ")
     
     return result.stdout
 

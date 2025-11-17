@@ -7,12 +7,12 @@ All notable changes to this project will be documented in this file.
 ### Added
 - `tomosar.gnss.modify_config` (see below)
 - `tomosar test precise-rktp` which can be used to test precise RTKP mode against broadcast to determine which to use
-- `tomosar test rtkp` which tests the internal rktp processing (with absolute antenna calibration) against raw RTKLIB `rnx2rtkp` 
+- `tomosar test rtkp` which tests the internal rktp processing (with absolute antenna calibration) against raw RTKLIB `rnx2rtkp`, and optionally tests precise mode on internal or both
 - Added automatic UTM zone detection to `tomosar.trackfinder._get_azimuth`
 
 ### Changed
 - `tomosar.binaries.tmp` no longer creates parents to temporary directories (which were not temporary), but fails if all parents do not exist when `allow_dir=True`
-- `tomosar.gnss.station_ppp` now allows input of SP3 and/or CLK files instead of always downloading, and accepts full SP3 files as input as well as IONEX files; it also returns the SP3 and CLK paths if retain is used (but not rotation matrix and distance). The output directory for the files can also be specified without specifying a path for `.out` file by inputing a directory as `out_path`. 
+- `tomosar.gnss.station_ppp` now allows input of SP3 and/or CLK files instead of always downloading, and accepts full SP3 files as input as well as IONEX files; it also returns the SP3 and CLK paths if retain is used (but not rotation matrix and distance). The output directory for the files can also be specified without specifying a path for `.out` file by inputing a directory as `out_path`, or specified separately by the new `download_dir` parameter.
 - `tomosar.binaries.ppp` now also accepts full SP3 files as input (instead of only ORBIT/CLK pairs) as well as IONEX files
 - Moved config file resource management from `tomosar.binaries.rnx2rtkp` to `tomosar.gnss.rtkp` and changed from multiple internal config files to dynamically updating the temporary config file copy by `tomosar.gnss.modify_config`
 - `tomosar.gnss.rtkp` now optionally allows input of SP3 and CLK files or downloading of SP3 and CLK files to run in precise mode, and also allows input of IONEX files
@@ -21,8 +21,9 @@ All notable changes to this project will be documented in this file.
 - Renamed `tomosar.gnss.read_pos_file` to `tomosar.gnss.read_rnx2rtkp_out` and `tomosar.gnss.read_out_file` to `tomosar.gnss.read_glab_out` and changed both to distinguish between file and stdout input by whether it is a string or a `pathlib.Path` object
 - `tomosar init` now uses precise ephemeris data in its RTKP post processing by default
 - Changed `tomosar.trackfinding.analyze_spiral` to calculate flight altitude, radius and azimuth in the local ENU frame of the center
-- `tomosar.gnss.merge_ephemeris` now calls specific functions to splice different ephemeris-related files (`tomosar.binaries.splice_sp3`, `tomosar.binaries.splice_clk`, `tomosar.binaries.splice.bias` and `tomosar.binaries.splice_inx`)
-- Renamed `tomosar.gnss.fetch_sp3_clk` to `tomosar.gnss.fetch_cod` and it now fetches COD Europe files for orbits (SP3), clock corrections (CLK) and Ionosphere maps (IONEX).
+- `tomosar.gnss.merge_ephemeris` now calls specific functions to splice SP3, CLK and IONEX files (`tomosar.binaries.splice_sp3`, `tomosar.binaries.splice_clk` and `tomosar.binaries.splice_inx`)
+- Renamed `tomosar.gnss.fetch_sp3_clk` to `tomosar.gnss.fetch_cod_files` and it now fetches COD Europe files for orbits (SP3), clock corrections (CLK) and Ionosphere maps (IONEX).
+- Removed buffer on downloading ephemeris and Ionosphere files (`tomosar.gnss.fetch_cod_files`)
 
 ### Fixed
 - Fixed bug in `tomosar --version` that caused it to sometimes display the previous version

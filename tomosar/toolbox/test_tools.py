@@ -2,15 +2,15 @@ import click
 import os
 from datetime import timedelta
 from pathlib import Path
-import math
 import numpy as np
 from matplotlib import pyplot as plt
 
-from ..gnss import fetch_swepos, station_ppp as run_ppp, reachz2rnx, rtkp as run_rtkp
+from ..gnss import fetch_swepos, station_ppp as run_ppp, reachz2rnx, rtkp as run_rtkp, extract_rnx_info
 from ..utils import generate_mocoref, ecef2enu
 from ..transformers import geo_to_ecef
 from ..config import LOCAL
 from ..binaries import resource, tmp, ubx2rnx
+from ..data import DataDir
 
 @click.group()
 def test() -> None:
@@ -46,8 +46,10 @@ def gnss(savar) -> None:
 
         print()
         print("Running station PPP post processing on Swepos files ...")
-        _, _, distance = run_ppp(swepos_obs, swepos_nav, header=False, out_path=swepos_obs.with_suffix(".out"))
-
+        ppp_pos, _, (sp3_file, clk_file, inx_file) = run_ppp(swepos_obs, swepos_nav, header=False, out_path=swepos_obs.with_suffix(".out"), retain=True)
+        _, _, header_pos, _ = extract_rnx_info(swepos_obs)
+        
+        distance = np.sqrt(((ppp_pos - header_pos)**2).sum())
         if distance < 0.2:
             print("TEST: station PPP sucessful")
             print()
@@ -60,12 +62,16 @@ def gnss(savar) -> None:
             rover_obs=rover_obs,
             base_obs=swepos_obs,
             nav_file=rover_nav,
-            out_path=out_path
+            out_path=out_path,
+            sp3_file=sp3_file,
+            clk_file=clk_file,
+            inx_file=inx_file,
+            precise=True
         )
         try: 
             quality_conversion = np.sum(q == 1) / len(q) * 100
             dur = timedelta(seconds=gpst[-1] - gpst[0])
-            print(f"Total {dur} processed, Q1={quality_conversion:.2f} %")
+            print(f"Length of processed data: {dur}")
         except:
             raise RuntimeError("rnx2rtkp failed to produce a .pos file with content")
 
@@ -77,107 +83,207 @@ def gnss(savar) -> None:
             raise RuntimeError("rnx2rtkp produced poor Q1 quality or lost time, check tomosar settings RTKP_CONFIG")
         
 @test.command()
-@click.argument("target", type=click.Path(exists=True, path_type=Path))
-@click.option("-m", "--mocoref", "mocoref_file", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("-n", "--navglo", "navglo_path", type=click.Path(exists=True, path_type=Path), default=None, help="Path to GLONASS navigation data file (can be a general/merged NAV file)")
-@click.option("-z", "--zip", "is_zip", is_flag=True, help="TARGET is a Reach ZIP archive (default for .zip files)")
-@click.option("--csv", is_flag=True, help="Mocoref file is a CSV file (default for .csv and .CSV files)")
-@click.option("--json", is_flag=True, help="Mocoref file is a JSON file (default for .json and .JSON files)")
-@click.option("--llh", is_flag=True, help="Mocoref file is an LLH log (default for .llh and .LLH files)")
-@click.option("-l", "--line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
-@click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between data log receiver and drone processing receiver (default=-0.079) for CSV files")
-@click.option("--ref", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Reference RINEX OBS")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=DataDir.cwd())
+@click.option("--swepos", "use_swepos", is_flag=True, help="Substitute for base OBS with files from nearest Swepos station")
+@click.option("-z", "-zip", "is_zip", is_flag=True, help="Force base OBS and mocoref.moco files to be generated from a Reach ZIP archive")
+@click.option("--mocoref", "is_mocoref", is_flag=True, help="Force mocoref data to be read from mocoref.moco file")
+@click.option("--csv", "is_csv", is_flag=True, help="Force mocoref data to be read from CSV file")
+@click.option("--json", "is_json", is_flag=True, help="Force mocoref data to be read from JSON file")
+@click.option("--llh", "is_llh", is_flag=True, help="Force mocoref data to be read from LLH file")
+@click.option("--rnx", "is_rnx", is_flag=True, help="Force base OBS to be directly accessible (not extracted)")
+@click.option("--hcn", "is_hcn", is_flag=True, help="Force base OBS to be extracted from a .HCN file")
+@click.option("--rtcm3", "is_rtcm3", is_flag=True, help="Force base OBS to be extracted from a .RTCM3 file")
+@click.option("-h", "--header", "use_header", is_flag=True, help="Read mocoref data from RINEX header")
+@click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
+@click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
+@click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
+@click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
+@click.option("-m", "--mask", "elevation_mask", type=float, default=None, help="Elevation mask for satellites")
+@click.option("-l", "--line", "csv_line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
+@click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
+@click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
 def station_ppp(
-    target: Path,
-    mocoref_file: Path,
-    navglo_path: Path|None,
+    path: DataDir,
+    use_swepos: bool,
     is_zip: bool,
-    csv: bool, 
-    json: bool,
-    llh: bool,
-    line: int,
+    is_mocoref: bool,
+    is_csv: bool,
+    is_json: bool,
+    is_llh: bool,
+    is_rnx: bool,
+    is_hcn: bool,
+    is_rtcm3: bool,
+    use_header: bool,
+    atx: Path,
+    receiver: Path,
+    downloads: int,
+    attempts: int,
+    elevation_mask: float,
+    csv_line: int,
     offset: float,
-    ref: Path,
+    minimal_overlap: float
 ) -> None:
-    """Test station PPP against ground truth as found in a mocoref file."""
-    if target.suffix == ".zip" or is_zip:
-        # Assume Reach ZIP archive
-        with tmp(target.parent / "tmp", allow_dir=True) as tmp_dir:
-            obs_data, (obs_file, mocoref_file, nav_file) = reachz2rnx(target, output_dir=tmp_dir, rnx_file=ref, nav=True, verbose=True)
-            (mocoref_latitude, mocoref_longitude, mocoref_height) = obs_data[mocoref_file]
-            pos, rotation, _ = run_ppp(obs_file, nav_file, header=False, retain=False, make_mocoref=False)
-    else:
-        if not mocoref_file:
-            raise FileNotFoundError(f"To test station-ppp on a RINEX OBS file, specify a mocoref file by --mocoref")
-        # Get mocoref position
-        if csv:
-            if json or llh:
-                raise ValueError("Only one of --csv, --json and --llh can be used")
-            type = "CSV"
-        elif json:
-            if llh:
-                raise ValueError("Only one of --csv, --json and --llh can be used")
-            type = "JSON"
-        elif llh:
-            type = "LLH"
-        else:
-            type = None
-        (mocoref_latitude, mocoref_longitude, mocoref_height), _ = generate_mocoref(
-            mocoref_file,
-            type=type,
-            line=line,
-            pco_offset=offset,
-            generate=False
+    """Test station PPP against ground truth as found in a mocoref file. This test opens a Data Directory to extract data and runs
+    station PPP on the base OBS, and compares it against the mocoref position."""
+
+    with path.open(
+        atx = atx,
+        receiver = receiver,
+        use_swepos = use_swepos,
+        use_ppp = False,
+        use_header=use_header,
+        is_zip = is_zip,
+        is_mocoref = is_mocoref,
+        is_csv = is_csv,
+        is_llh = is_llh,
+        is_json = is_json,
+        is_rnx = is_rnx,
+        is_hcn = is_hcn,
+        is_rtcm3 = is_rtcm3,
+        csv_line = csv_line,
+        offset = offset,
+        download_attempts = attempts,
+        max_downloads = downloads,
+        elevation_mask = elevation_mask,
+        minimal_overlap = minimal_overlap,
+    ) as data:
+        ppp_pos, rotation, _ = run_ppp(
+            data.base_obs,
+            navglo_path=data.base_nav,
+            atx_path=atx,
+            antrec_path=receiver,
+            sp3_file=data.sp3,
+            clk_file=data.clk,
+            inx_file=data.inx,
+            max_downloads=downloads,
+            max_retries=attempts,
+            elevation_mask=elevation_mask,
+            header=False,
+            make_mocoref=False
         )
-        pos, rotation, _ = run_ppp(target, navglo_path=navglo_path, header=False, retain=False, make_mocoref=False)
-
-    mocoref_pos = geo_to_ecef.transform(mocoref_longitude, mocoref_latitude, mocoref_height)
-
-    diff = rotation @ [mocoref_pos[0] - pos[0], mocoref_pos[1] - pos[1], mocoref_pos[2] - pos[2]]
-    distance = math.sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
-    print(f"Distance: {distance:.3} m (E: {diff[0]:.3} m, N: {diff[1]:.3} m, U: {diff[2]:.3} m)")
+        diff = rotation @ (data.base_pos - ppp_pos)
+    
+    distance = np.sqrt((diff**2).sum())
+    print(f"Distance: {distance:.2f} m (E: {diff[0]:.2f} m, N: {diff[1]:.2f} m, U: {diff[2]:.2f} m)")
 
 @test.command()
-@click.argument("rover_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
-@click.argument("nav_path", type=click.Path(exists=True, path_type=Path, dir_okay=False))
-@click.argument("base_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
-@click.option("--sp3", "sp3_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to SP3 file (if not specifed: download)", default=None)
-@click.option("--clk", "clk_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to CLK file to complement SP3 file if needed", default=None)
-@click.option("-k", "--config", 'conf_path', help="Path to config file", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("-s", "--sbas", 'sbs_path', help="Path to SBAS corrections file", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("--mocoref", 'mocoref_path', help="Path to mocoref file for first base", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("-m", "--mask", "elevation_mask", type=float, help="Specify elevation mask")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=DataDir.cwd())
+@click.option("--swepos", "use_swepos", is_flag=True, help="Substitute for base OBS with files from nearest Swepos station")
+@click.option("--ppp", "use_ppp", is_flag=True, help="Subsitute for mocoref data by running static PPP on base OBS")
+@click.option("-z", "-zip", "is_zip", is_flag=True, help="Force base OBS and mocoref.moco files to be generated from a Reach ZIP archive")
+@click.option("--mocoref", "is_mocoref", is_flag=True, help="Force mocoref data to be read from mocoref.moco file")
+@click.option("--csv", "is_csv", is_flag=True, help="Force mocoref data to be read from CSV file")
+@click.option("--json", "is_json", is_flag=True, help="Force mocoref data to be read from JSON file")
+@click.option("--llh", "is_llh", is_flag=True, help="Force mocoref data to be read from LLH file")
+@click.option("--rnx", "is_rnx", is_flag=True, help="Force base OBS to be directly accessible (not extracted)")
+@click.option("--hcn", "is_hcn", is_flag=True, help="Force base OBS to be extracted from a .HCN file")
+@click.option("--rtcm3", "is_rtcm3", is_flag=True, help="Force base OBS to be extracted from a .RTCM3 file")
+@click.option("-h", "--header", "use_header", is_flag=True, help="Read mocoref data from RINEX header (no separate file, use ONLY if RINEX header is known to contain precise position)")
+@click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
+@click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
+@click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
+@click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
+@click.option("-m", "--mask", "elevation_mask", type=float, default=None, help="Elevation mask for satellites")
+@click.option("-l", "--line", "csv_line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
+@click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
+@click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
+@click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 def precise_rtkp(
-    rover_obs: Path,
-    base_obs: Path,
-    nav_path: Path,
-    sp3_path: Path|None,
-    clk_path: Path|None,
-    conf_path: Path|None,
-    sbs_path: Path|None,
-    mocoref_path: Path|None,
-    elevation_mask: float) -> None:
-    """Compare solutions from precise and broadcast ephemeris data in RTKP post processing"""
+    path: DataDir,
+    use_swepos: bool,
+    use_ppp: bool,
+    is_zip: bool,
+    is_mocoref: bool,
+    is_csv: bool,
+    is_json: bool,
+    is_llh: bool,
+    is_rnx: bool,
+    is_hcn: bool,
+    is_rtcm3: bool,
+    use_header: bool,
+    atx: Path,
+    receiver: Path,
+    downloads: int,
+    attempts: int,
+    elevation_mask: float,
+    csv_line: int,
+    offset: float,
+    minimal_overlap: float,
+    config: Path,
+) -> None:
+    """Compare solutions from precise and broadcast ephemeris data in RTKP post processing. This test opens a Data Directory and runs RTKP
+    post processing on the drone once with precise mode and once with broadcast ephemeris data."""
 
-    # Run base 1
-    print("PRECISE:")
-    coords_precise, gpst, q_precise= run_rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask, precise=True, sp3_file=sp3_path, clk_file=clk_path)
+    with path.open(
+        require_drone=True,
+        atx = atx,
+        receiver = receiver,
+        use_swepos = use_swepos,
+        use_ppp = use_ppp,
+        use_header=use_header,
+        is_zip = is_zip,
+        is_mocoref = is_mocoref,
+        is_csv = is_csv,
+        is_llh = is_llh,
+        is_json = is_json,
+        is_rnx = is_rnx,
+        is_hcn = is_hcn,
+        is_rtcm3 = is_rtcm3,
+        csv_line = csv_line,
+        offset = offset,
+        download_attempts = attempts,
+        max_downloads = downloads,
+        elevation_mask = elevation_mask,
+        minimal_overlap = minimal_overlap,
+    ) as data:
+        if use_swepos and not elevation_mask:
+            elevation_mask = 20 # Precise 
+        coords_prec, gpst, q_prec = run_rtkp(
+            rover_obs=data.drone_rnx_obs,
+            base_obs=data.base_obs,
+            nav_file=data.drone_rnx_nav,
+            sbs_file=data.drone_rnx_sbs,
+            sp3_file=data.sp3,
+            clk_file=data.clk,
+            inx_file=data.inx,
+            precise=True,
+            out_path=data.drone_rnx_obs.with_suffix(".pos"),
+            config_file=config,
+            elevation_mask=elevation_mask,
+            mocoref_file=data.mocoref,
+            retain=False
+        )
 
-    # Run base 2
-    print("BROADCAST:")
-    coords_bc, _, q_bc = run_rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask)
+        if use_swepos and not elevation_mask:
+            elevation_mask = 5 # Broadcast
+        coords_bc, _, q_bc = run_rtkp(
+            rover_obs=data.drone_rnx_obs,
+            base_obs=data.base_obs,
+            nav_file=data.drone_rnx_nav,
+            sbs_file=data.drone_rnx_sbs,
+            sp3_file=data.sp3,
+            clk_file=data.clk,
+            inx_file=data.inx,
+            precise=False,
+            out_path=data.drone_rnx_obs.with_suffix(".pos"),
+            download_dir=data.container,
+            config_file=config,
+            elevation_mask=elevation_mask,
+            mocoref_file=data.mocoref,
+            retain=True
+        )
 
     # Index tracking
-    precise_only = (q_precise != 1) & (q_bc == 1)
-    bc_only = (q_bc != 1) & (q_precise == 1)
-    both = (q_precise != 1) & (q_bc != 1)
+    precise_only = (q_prec != 1) & (q_bc == 1)
+    bc_only = (q_bc != 1) & (q_prec == 1)
+    both = (q_prec != 1) & (q_bc != 1)
     
     fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8), sharex=True, tight_layout=True)
     axs = axs.flatten()
     ax = axs[0]
     #ax.plot(gpst, coords_precise[:,2], 'g-', label=f"Precise")
-    ax.plot(gpst, coords_bc[:,2], 'g-', label=f"Broadcast track")
-    ax.plot(gpst[precise_only], coords_precise[:,2][precise_only], 'r+', label=f"Precise only float")
+    ax.plot(gpst, coords_prec[:,2], 'g-', label=f"Precise track")
+    ax.plot(gpst[precise_only], coords_prec[:,2][precise_only], 'r+', label=f"Precise only float")
     ax.plot(gpst[bc_only], coords_bc[:,2][bc_only], 'm+', label=f"Broadcast only float")
     ax.plot(gpst[both], coords_bc[:,2][both], 'y+', label=f"Both float")
     ax.set_ylabel("Ellipsoidal Height (m)")
@@ -185,8 +291,8 @@ def precise_rtkp(
     ax = axs[1]
 
     diff = np.vstack([
-        ecef2enu(coords_precise[n, 0], coords_precise[n, 1]) @ 
-            (np.asarray(geo_to_ecef.transform(*coords_bc[n, :])) - np.asarray(geo_to_ecef.transform(*coords_precise[n, :])))
+        ecef2enu(coords_prec[n, 0], coords_prec[n, 1]) @ 
+            (np.asarray(geo_to_ecef.transform(*coords_bc[n, :])) - np.asarray(geo_to_ecef.transform(*coords_prec[n, :])))
             for n in range(len(gpst))
     ])
 
@@ -200,36 +306,113 @@ def precise_rtkp(
     plt.show()
 
 @test.command()
-@click.argument("rover_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
-@click.argument("nav_path", type=click.Path(exists=True, path_type=Path, dir_okay=False))
-@click.argument("base_obs", type=click.Path(exists=True, path_type=Path, dir_okay=False))
-@click.option("--sp3", "sp3_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to SP3 file (if not specifed: download)", default=None)
-@click.option("--clk", "clk_path", type=click.Path(exists=True, path_type=Path, dir_okay=False), help="Path to CLK file to complement SP3 file if needed", default=None)
-@click.option("-k", "--config", 'conf_path', help="Path to config file", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("-s", "--sbas", 'sbs_path', help="Path to SBAS corrections file", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("--mocoref", 'mocoref_path', help="Path to mocoref file for first base", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("-m", "--mask", "elevation_mask", type=float, help="Specify elevation mask")
-@click.option("--precise", "use_precise", is_flag=True, help="Download precise ephemeris data (if not provided)")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=DataDir.cwd())
+@click.option("--swepos", "use_swepos", is_flag=True, help="Substitute for base OBS with files from nearest Swepos station")
+@click.option("--ppp", "use_ppp", is_flag=True, help="Subsitute for mocoref data by running static PPP on base OBS")
+@click.option("-z", "-zip", "is_zip", is_flag=True, help="Force base OBS and mocoref.moco files to be generated from a Reach ZIP archive")
+@click.option("--mocoref", "is_mocoref", is_flag=True, help="Force mocoref data to be read from mocoref.moco file")
+@click.option("--csv", "is_csv", is_flag=True, help="Force mocoref data to be read from CSV file")
+@click.option("--json", "is_json", is_flag=True, help="Force mocoref data to be read from JSON file")
+@click.option("--llh", "is_llh", is_flag=True, help="Force mocoref data to be read from LLH file")
+@click.option("--rnx", "is_rnx", is_flag=True, help="Force base OBS to be directly accessible (not extracted)")
+@click.option("--hcn", "is_hcn", is_flag=True, help="Force base OBS to be extracted from a .HCN file")
+@click.option("--rtcm3", "is_rtcm3", is_flag=True, help="Force base OBS to be extracted from a .RTCM3 file")
+@click.option("-h", "--header", "use_header", is_flag=True, help="Read mocoref data from RINEX header (no separate file, use ONLY if RINEX header is known to contain precise position)")
+@click.option("--broadcast", "use_broadcast", is_flag=True, help="Use broadcast ephemeris data (NOTE: this may improve Q1 percentage, but risks reducing integrity, run tomosar test precise-rktp to test)")
+@click.option("-a", "--atx", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the satellite antenna .atx file")
+@click.option("-r", "--receiver", type=click.Path(exists=True, path_type=Path), default=None, help="Path to the .atx file containing receiver antenna info")
+@click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
+@click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
+@click.option("-m", "--mask", "elevation_mask", type=float, default=None, help="Elevation mask for satellites")
+@click.option("-l", "--line", "csv_line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
+@click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
+@click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
+@click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 def rtkp(
-    rover_obs: Path,
-    base_obs: Path,
-    nav_path: Path,
-    sp3_path: Path|None,
-    clk_path: Path|None,
-    conf_path: Path|None,
-    sbs_path: Path|None,
-    mocoref_path: Path|None,
+    path: DataDir,
+    use_swepos: bool,
+    use_ppp: bool,
+    is_zip: bool,
+    is_mocoref: bool,
+    is_csv: bool,
+    is_json: bool,
+    is_llh: bool,
+    is_rnx: bool,
+    is_hcn: bool,
+    is_rtcm3: bool,
+    use_header: bool,
+    use_broadcast: bool,
+    atx: Path,
+    receiver: Path,
+    downloads: int,
+    attempts: int,
     elevation_mask: float,
-    use_precise: bool) -> None:
-    """Compare solutions from internal and raw RTKP post processing"""
+    csv_line: int,
+    offset: float,
+    minimal_overlap: float,
+    config: Path,
+) -> None:
+    """Compare solutions from internal and raw RTKP post processing. This test opens a Data Directory and runs RTKP post processing
+    on the drone once with the internal resources (absolute antenna callibrations) and file downloads, and once raw (no callibration
+    and no files downloaded)."""
 
-    # Run base 1
-    print("INTERNAL:")
-    coords_int, gpst, q_int= run_rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask, precise=use_precise, sp3_file=sp3_path, clk_file=clk_path)
-
-    # Run base 2
-    print("RAW:")
-    coords_raw, _, q_raw = run_rtkp(rover_obs, base_obs, nav_path, config_file=conf_path, sbs_file=sbs_path, mocoref_file=mocoref_path, elevation_mask=elevation_mask, raw=True, precise=use_precise, sp3_file=sp3_path, clk_file=clk_path)
+    with path.open(
+        require_drone=True,
+        atx = atx,
+        receiver = receiver,
+        use_swepos = use_swepos,
+        use_ppp = use_ppp,
+        use_header=use_header,
+        is_zip = is_zip,
+        is_mocoref = is_mocoref,
+        is_csv = is_csv,
+        is_llh = is_llh,
+        is_json = is_json,
+        is_rnx = is_rnx,
+        is_hcn = is_hcn,
+        is_rtcm3 = is_rtcm3,
+        csv_line = csv_line,
+        offset = offset,
+        download_attempts = attempts,
+        max_downloads = downloads,
+        elevation_mask = elevation_mask,
+        minimal_overlap = minimal_overlap,
+    ) as data:
+        if use_swepos and not elevation_mask:
+            if not use_broadcast:
+                elevation_mask = 20 # Precise 
+            else:
+                elevation_mask = 5
+        coords_int, gpst, q_int = run_rtkp(
+            rover_obs=data.drone_rnx_obs,
+            base_obs=data.base_obs,
+            nav_file=data.drone_rnx_nav,
+            sbs_file=data.drone_rnx_sbs,
+            sp3_file=data.sp3,
+            clk_file=data.clk,
+            inx_file=data.inx,
+            precise=not use_broadcast,
+            out_path=data.drone_rnx_obs.with_suffix(".pos"),
+            config_file=config,
+            elevation_mask=elevation_mask,
+            mocoref_file=data.mocoref,
+            retain=False
+        )
+        coords_raw, _, q_raw = run_rtkp(
+            rover_obs=data.drone_rnx_obs,
+            base_obs=data.base_obs,
+            nav_file=data.drone_rnx_nav,
+            sbs_file=data.drone_rnx_sbs,
+            sp3_file=data.sp3,
+            clk_file=data.clk,
+            inx_file=data.inx,
+            precise=False,
+            out_path=data.drone_rnx_obs.with_suffix(".pos"),
+            config_file=config,
+            elevation_mask=elevation_mask,
+            mocoref_file=data.mocoref,
+            raw=True
+        )
 
     # Index tracking
     int_only = (q_int != 1) & (q_raw == 1)

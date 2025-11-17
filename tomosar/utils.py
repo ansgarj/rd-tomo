@@ -480,7 +480,7 @@ def string_sub(text: str, pattern: str, replacement: str, n: int = 1) -> str:
     return text[:start] + replacement + text[end:]
 
 # Bin variables from a dict or pd.DataFrame according to the corresponding angular value
-def bin_by_angle(theta, vars, bin_count=None, units='degrees', rotate: bool = False) -> tuple[dict[np.ndarray],str]:
+def bin_by_angle(theta, vars, bin_count=None, units='degrees', rotate: bool = False) -> tuple[dict[str, np.ndarray], str]:
     """
     Bins unwrapped angles into wrapped bins and computes the median of associated variables.
 
@@ -553,7 +553,7 @@ def bin_by_angle(theta, vars, bin_count=None, units='degrees', rotate: bool = Fa
 
     return result, theta_name
 
-def _rotate_bins(binned_matrices, theta_name):
+def _rotate_bins(binned_matrices: dict[str, np.ndarray], theta_name: str) -> dict[str, np.ndarray]:
     """
     This functions rotates the output of abin so that the first row contains the start of the first
     wrapping, and counts angles from this position instead.
@@ -578,7 +578,7 @@ def _rotate_bins(binned_matrices, theta_name):
     return binned_matrices
 
 # Compute and handle stats from a dictionary with 1D np.ndarrays or pd.DataFrames with nesting
-def compute_stats(d: dict):
+def compute_stats(d: dict) -> tuple[dict, dict]:
     result_mean = {}
     result_std = {}
     for key, value in d.items():
@@ -604,14 +604,14 @@ def compute_stats(d: dict):
             raise TypeError(f"Unsupported type for key '{key}': {type(value)}")
     return result_mean, result_std
 
-def round_to_sig_digits(value, digits=3):
+def round_to_sig_digits(value: float|np.floating, digits: int = 3) -> float:
     if not isinstance(value, (float, np.floating)):
         raise TypeError(f"Value: {value} of type {type(value)}")
     if value == 0:
         return 0
     return round(value, -int(math.floor(math.log10(abs(value))) - (digits - 1)))
 
-def round_to_same_decimal(value, reference):
+def round_to_same_decimal(value: float|np.floating, reference: float|np.floating) -> float:
     if reference == 0:
         return value
     if abs(reference) > abs(value):
@@ -982,6 +982,7 @@ def generate_mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, output_
             generate = False
             if not data_file:
                 raise RuntimeError("No mocoref file was specified")
+            mocoref_path = data_file
             with open(data_file, 'r') as file:
                 lines = file.readlines()
             value = re.compile(r"\d+(?:[\.\,]\d*)?")
@@ -1000,10 +1001,7 @@ def generate_mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, output_
         lines.append(f"Longitude [deg]    {{d}}: {mocoref_longitude}\n")
         lines.append(f"Ground [m]         {{d}}: {mocoref_height}\n")
     if generate:
-        if data_file:
-            mocoref_path = data_file.parent / "mocoref.moco"
-        else:
-            mocoref_path = Path.cwd() / "mocoref.moco"
+        mocoref_path = output_dir / "mocoref.moco"
         with open(mocoref_path, 'w') as file:
             file.writelines(lines)
     else:

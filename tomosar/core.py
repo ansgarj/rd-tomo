@@ -19,6 +19,7 @@ from rasterio.features import rasterize
 import json
 from collections import defaultdict
 import copy
+from typing import KeysView, ValuesView, ItemsView
 
 from .utils import warn, collect_statistics, estimaterr, apply_variable_descriptions, parse_datetime_string
 from .tomogram_processing import multilook, filter
@@ -503,17 +504,18 @@ class Mask:
         return masked_tomogram
 
 class Masks:
+    
     def __init__(self, parent: TomoInfo = None, masks: dict[str,list[Mask]] = defaultdict[list]):
         self.parent: TomoInfo = parent
         self.masks: dict[str,list[Mask]] = masks
             
-    def keys(self):
+    def keys(self) -> KeysView[str]:
         return self.masks.keys()
     
-    def values(self):
+    def values(self) -> ValuesView[list[Mask]]:
         return self.masks.values()
     
-    def items(self):
+    def items(self) -> ItemsView[str, list[Mask]]:
         return self.masks.items()
     
     def update(self, mask_dir: str = ""):

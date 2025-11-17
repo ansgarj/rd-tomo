@@ -58,7 +58,7 @@ class Frequencies:
 class Beam:
     __slots__ = ("BAND_POLARIZATIONS", "BEAMWIDTHS", "DEPRESSION_ANGLES", "UNIT")
 
-    def __init__(self):
+    def __init__(self) -> None:
         st = Settings()
         object.__setattr__(self, "BAND_POLARIZATIONS", tuple(
             (band, pol) for band, pol_list in st.RADAR["POLARIZATIONS"].items() for pol in pol_list
@@ -420,7 +420,7 @@ def internal_file(key: str) -> str:
             filename = "CHCI83.atx"
         case "SWEPOS_COORDINATES":
             filename = "Koordinatlista_2025_10_14.csv"
-    with importpath('tomosar.data', filename) as resource_path:
+    with importpath('tomosar.resources', filename) as resource_path:
         return str(resource_path)
     
 DEFAULT = {
