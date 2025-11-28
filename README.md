@@ -1,5 +1,5 @@
 # README
-This repository contains the `tomosar` python module which is **in alpha development**, which also provides a selection of [CLI Tools](#core-cli-tools) that can be run directly from the terminal. It can be installed into your  `Python` environment via `pip`, and is constructed to be installed in **editable** mode.
+This repository contains the `rdtomo` python module which is **in alpha development**, which also provides a selection of [CLI Tools](#core-cli-tools) that can be run directly from the terminal. It can be installed into your  `Python` environment via `pip`, and is constructed to be installed in **editable** mode.
 
 If you clone the repository you will have local access to the code for experimentation and your own development (you can later create your own _branch_ and `git push` that branch and make _pull requests_ to merge your _branch_ to the `main` branch, see [Collaboration](#collaboration)), and you can `git pull` any updates and see the changes immediately reflected in your environment.
 
@@ -10,8 +10,8 @@ Included below is some basic GitHub usage, but there is also plenty of documenta
 
 Make sure you have the `make` utility available and run:
 ```sh
-git clone https://github.com/ansgarj/TomoSAR.git
-cd TomoSAR
+git clone https://github.com/ansgarj/rd-tomo.git
+cd rd-tomo
 make install
 ```
 
@@ -27,8 +27,8 @@ activate() {
     local alias="$1"
         
     case "$alias" in 
-        sar)
-            source "$HOME/TomoSAR/.venv/bin/activate"
+        rd)
+            source "$HOME/rd-tomo/.venv/bin/activate"
             ;;
         *)
             echo "Unknown project alias: $alias"
@@ -37,10 +37,10 @@ activate() {
         esac
 }
 ```
-That way I can activate the virtual environment by running e.g. `activate sar` from any folder (say, where I have the radar data). 
+That way I can activate the virtual environment by running e.g. `activate rd` from any folder (say, where I have the radar data). 
 
 ### Required Binaries
-The `tomosar` module relies on some 3rd party software for GNSS processing. It is recommended to make sure you have everything set up before starting to use the toolbox, even though it is not _strictly_ necessary. If you run `make install` as suggested above, this is already done. Otherwise you can run `tomosar dependencies` to perform the check independently. This will check if there are any binaries in your `PATH` with the correct names, but not actually test if it is the correct binaries, and provide helpful information if not (including source html links where applicable). The required binaries are:
+The `rdtomo` module relies on some 3rd party software for GNSS processing. It is recommended to make sure you have everything set up before starting to use the toolbox, even though it is not _strictly_ necessary. If you run `make install` as suggested above, this is already done. Otherwise you can run `rdtomo dependencies` to perform the check independently. This will check if there are any binaries in your `PATH` with the correct names, but not actually test if it is the correct binaries, and provide helpful information if not (including source html links where applicable). The required binaries are:
 1. `convbin` from `rtklib`
 2. `rnx2rtkp` from `rtklib`
 3. `crx2rnx` from GSI Japan
@@ -48,43 +48,46 @@ The `tomosar` module relies on some 3rd party software for GNSS processing. It i
 5. `glab` from UPC/gAGE and ESA
 6. `unimoco` from Radaz
 
-You can also run `tomosar test gnss` to test the GNSS processing capabilities, but this requires internet access and a valid login to the Swepos network.
+You can also run `rdtomo test gnss` to test the GNSS processing capabilities, but this requires internet access and a valid login to the Swepos network.
 
-**NOTE**: some of the binaries will have different names, e.g. `CRX2RNX` or `gLAB_linux` when downloaded, but the name provided above and by `tomotest binaries` are the names the `tomosar` module uses and the binaries should either be _renamed_ and moved into the `PATH` _or_ you can create a _symlink_ with the correct name in the `PATH`. 
+**NOTE**: some of the binaries will have different names, e.g. `CRX2RNX` or `gLAB_linux` when downloaded, but the name provided above and by `rdtomo dependencies` are the names the `rdtomo` module uses and the binaries should either be _renamed_ and moved into the `PATH` _or_ you can create a _symlink_ with the correct name in the `PATH`. 
 
-**NOTE**: _TomoSAR_ uses the `tomosar.resource` (from `.binaries`) context manager to provide local copies of various files in the working directory (not radar, IMU or GNSS data which are expected to be inside the working directory tree). The basic reason for this is to allow the use of containers to run 3rd party binaries (such as docker). 
+**NOTE**: _rd-tomo_ uses the `rdtomo.manager.resource` context manager to provide local copies of various files in the working directory (not radar, IMU or GNSS data which are expected to be inside the working directory tree). The basic reason for this is to allow the use of containers to run 3rd party binaries (such as docker). 
 
-**NOTE**: I use the [Explorer](https://github.com/rtklibexplorer/RTKLIB) fork of `rtklib`, and this is the one `tomosar setup`  and `tomosar dependencies` will suggest installing if it finds no `convbin` or `rnx2rtkp` binary, **but** it _should_ run on standard `rtklib` as well.
+**NOTE**: I use the [Explorer](https://github.com/rtklibexplorer/RTKLIB) fork of `rtklib`, and this is the one _rd-tomo_ will suggest installing if it finds no `convbin` or `rnx2rtkp` binary, **but** it _should_ run on standard `rtklib` as well.
 
 ## Usage
-The `tomosar` _module_ is a work-in-progress to provide a one-stop toolbox for our tomographic SAR needs. Once installed it can be imported into Python by running `import tomosar`, or you can select submodules or objects as usual  in Python. Currently, the only available documentation is the one present in the code, _but I plan to add separate documentation later._
+The `rdtomo` _module_ is a work-in-progress to provide a one-stop toolbox for our tomographic SAR needs. Once installed it can be imported into Python by running `import rdtomo`, or you can select submodules or objects as usual  in Python. Currently, the only available documentation is the one present in the code, _but I hope to add separate documentation later._
 
-The CLI tools are intended to provide a toolbox for the most common or predicted needs, the idea being that unless you are working on your own project with something not integrated into the CLI tools, you can use the module directly from the terminal by running a command without having to enter into Python and importing the module.  All tools are accessed as subcommands of `tomosar` and can be called with `--help` for some basic syntax: `tomosar --help` provides syntax help and `tomosar manual` prints a general help overview.
+The CLI tools are intended to provide a toolbox for the most common or predicted needs, the idea being that unless you are working on your own project with something not integrated into the CLI tools, you can use the module directly from the terminal by running a command without having to enter into Python and importing the module.  All tools are accessed as subcommands of `rdtomo` and can be called with `--help` for some basic syntax: `rdtomo --help` provides syntax help and `rdtomo manual` prints a general help overview.
 
 **NOTE**: many of these tools are not yet fully implemented.
 
 ### Settings
-The local _TomoSAR_ settings are stored inside the `.local` folder inside the project directory in a `settings.json` file. The current settings can be viewed with `tomosar settings` which prints to stdout.
+The local _rd-tomo_ settings are stored inside the `.local` folder inside the project directory in a `settings.json` file. The current settings can be viewed with `rdtomo settings` which prints to stdout.
 
-`FILES: ANTENNAS` can be used to point to antenna files containing absolute calibration data for the receiver antenna if not included in the `FILES: ANTENNAS: SATELLITES` file. Add files with `tomosar add RECEIVER` or change the `SATELLITES` file with `tomosar set SATELLITES`. **Note**: if a `RECEIVER` file is not specified for a specific antenna, _TomoSAR_ will look inside the `SATELLITES` file as a fallback. **Note 2**: The internal file for the CHCI83 receiver contains **unverified** calibration data (copied from GPS to other constellations), and causes PPP to fail.
+`FILES: ANTENNAS` can be used to point to antenna files containing absolute calibration data for the receiver antenna if not included in the `FILES: ANTENNAS: SATELLITES` file. Add files with `tomosar add RECEIVER` or change the `SATELLITES` file with `tomosar set SATELLITES`. **Note**: if a `RECEIVER` file is not specified for a specific antenna, _rd-tomo_ will look inside the `SATELLITES` file as a fallback. **Note 2**: The internal file for the CHCI83 receiver contains **unverified** calibration data (copied from GPS to other constellations), and causes PPP to fail.
 
 Note that you can set login info for the Swepos network (so you don't have to specify manually) by `tomosar set SWEPOS_USERNAME` and `tomosar set SWEPOS_PASSWORD`, but that the password is stored inside `settings.json` in an **unencrypted state**. Use therefore with caution. 
 
-Finally you can use `tomosar add` to add files or folders to `FILES: DEMS`, `FILES: CANOPIES` and `FILES: MASKS`. These lists are used by _TomoSAR_ to find GeoTIFF files for DEM and canopy DSM references, and shape files for masking tomograms. The GeoTIFF files are used for slicing (`tomosar slice` \[**NOT IMPLEMENTED**\]) with either the ground or the canopy as reference respectively. The shapefiles are used to generate masks by `tomosar process/forge`, and can be updated for a [Tomogram Directory](#tomogram-directories) or multiple [Tomogram Directories](#tomogram-directories) by running `tomosar load --update` and then inside the Python terminal:
+Finally you can use `rdtomo add` to add files or folders to `FILES: DEMS`, `FILES: CANOPIES` and `FILES: MASKS`. These lists are used by _rd-tomo_ to find GeoTIFF files for DEM and canopy DSM references, and shape files for masking tomograms. The GeoTIFF files are used for slicing (`rdtomo process/slice` \[**NOT IMPLEMENTED**\]) with either the ground or the canopy as reference respectively. The shapefiles are used to generate masks by `rdtomo process/forge`, and can be updated for a [Tomogram Directory](#tomogram-directories) or multiple [Tomogram Directories](#tomogram-directories) by running `rdtomo load` and then inside the Python terminal identify the correct directory(-ies) (here X):
 ```python
-tomos.save()
+directories[X].update()
+directories[X].save()
 ```
 
+**Note**: paths added to `DEMS`, `CANOPIES` and `MASKS` are in a specific Reference Frame (default: the REFERENCE_FRAMES: TARGET), and are used only when the REFERENCE_FRAME: TARGET coincide with the Frame of the path (they are stored in dicts indexed by Reference Frame).
+
 ### Data Directories
-As a _data directory_ functions anything containing at least the drone data. There are no specific requirements on the _internal_ structure, but each data directory should contain **only one set of data** (one recording from the drone and matching GNSS data if available). Data directories are _generated_ by `tomoprocess data` \[**NOT IMPLEMENTED**\] if used to fetch drone data. **By default** they are generated inside `$HOME/Radar/Data` but this can be altered with `tomosar set DATA_DIRS /your/path/here`.
+As a _data directory_ functions anything containing at least the drone data. There are no specific requirements on the _internal_ structure, but each data directory should contain **only one set of drone data** and matching base RINEX OBS files with mocoref data files (mocoref.moco, .csv, .llh or .json). Missing RINEX OBS files can be supplemented by fetching Swepos data, and missing mocoref data can be supplemented by PPP processing on the RINEX OBS file.
 
 ### Processing Directories
-Processing directories have the internal structure required by the Radaz processing functions, even in those cases (if any) where TomoSAR replaces them, for compatibility reasons. They are _generated_ by `tomoprocess init` \[**NOT IMPLEMENTED**\]. **By default** they are generated inside `$HOME/Radar/Processing` but this can be altered with `tomosar set PROCESSING_DIRS /your/path/here`.
+Processing directories have the internal structure required by the Radaz processing functions, even in those cases (if any) where _rd-tomo_ replaces them, for compatibility reasons. They are _generated_ by `rdtomo init`. **By default** they are generated inside `$HOME/Radar/Processing` but this can be altered with `rdtomo set PROCESSING_DIRS /your/path/here`.
 
 ### Tomogram Directories
-A _Tomogram Directory_ is an output directory ending with `.tomo` generated by `tomoprocess forge` or `tomoprocess tomo`, which contains _all relevant files_ and serves as an output repository for _processed data_. It contains an _internal structure_ that must be maintained, and any files contained in there can be accessed normally for 3rd party software or file sharing et.c. It is thus a **unified** output format for storing processed data, making collaboration easier. **By default** they are generated inside `$HOME/Radar/Tomograms` but this can be altered with `tomosar set TOMOGRAM_DIRS /your/path/here`. 
+A _Tomogram Directory_ is an output directory ending with `.tomo` generated by `rdtomo process` \[NOT IMPLEMENTED\] or `rdtomo forge`, which contains _all relevant files_ and serves as an output repository for _processed data_. It contains an _internal structure_ that must be maintained, and any files contained in there can be accessed normally for 3rd party software or file sharing et.c. It is thus a **unified** output format for storing processed data, making collaboration easier. **By default** they are generated inside `$HOME/Radar/Tomograms` but this can be altered with `rdtomo set TOMOGRAM_DIRS /your/path/here`. 
 
-However, the **main advantage** of the `.tomo` directories is that they can be loaded directly by `tomoview` for viewing the tomogram, plotting statistics or other analysis tools (**under implementation**).
+However, the **main advantage** of the `.tomo` directories is that they can be loaded directly by `rdtomo load` for programmatic access or `rdtomo view` \[NOT IMPLEMENTED\] for viewing the tomogram, plotting statistics or other analysis tools (**under implementation**).
 
 ```
 yyyy-mm-dd-HH-MM-SS-XX-tag.tomo/
@@ -118,6 +121,9 @@ yyyy-mm-dd-HH-MM-SS-XX-tag.tomo/
 |    |-- ...
 |-- ...
 ```
+
+### Tomogram Archives
+As a _Tomogram Archive_ is counted any folder containing `.tomo` directories (non-recursively), with the additional demand that each `.tomo` directory must cover a unique scene (timestamp-spiral). Thus an archive can have child and parent archives. This is intended as an organizational help. A _Tomogram Archive_ can also be loaded into Python using e.g. `rdtomo view` \[NOT IMPLEMENTED\] or `rdtomo load`.
 
 ## Collaboration
 If you want to modify the module or work on features to add, always **create your own branch**:

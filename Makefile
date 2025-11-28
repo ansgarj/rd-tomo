@@ -1,6 +1,6 @@
 # Get the directory of the Makefile itself
 PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-VENV_DIR := $(PROJECT_DIR)/.venv
+VENV_DIR := $(PROJECT_DIR).venv
 ACTIVATE := $(VENV_DIR)/bin/activate
 
 # Detect OS
@@ -25,12 +25,12 @@ install:
 	@echo "Installing package in editable mode..."
 	@. $(ACTIVATE) && pip install -e $(PROJECT_DIR)
 
-	@echo "Running tomosar setup..."
-	@. $(ACTIVATE) && tomosar dev update-install && tomosar setup
+	@echo "Running rdtomo setup..."
+	@. $(ACTIVATE) && rdtomo dev update-install && rdtomo setup
 
 	@echo "All done."
 
 update:
 	@. $(ACTIVATE) && pip install -e $(PROJECT_DIR)
-	@. $(ACTIVATE) && tomosar dev update-install
+	@. $(ACTIVATE) && rdtomo dev update-install
 	@echo "Installation updated."

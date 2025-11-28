@@ -102,6 +102,7 @@ def set(key, value) -> None:
     RTKP_CONFIG, DATA_DIRS, PROCESSING_DIRS, TOMO_DIRS, SWEPOS_USERNAME, SWEPOS_PASSWORD, SWEPOS_COORDINATES, MOCOREF_LONGITUDE, MOCOREF_LATITUDE, MOCOREF_HEIGHT, MOCOREF_ANTENNA"""
     
     valid_keys = ["RTKP_CONFIG", "DATA_DIRS", "PROCESSING_DIRS", "TOMO_DIRS", "SWEPOS_USERNAME", "SWEPOS_PASSWORD",
+                  "TARGET_FRAME", "MOCOREF_FRAME",
                   "MOCOREF_LONGITUDE", "MOCOREF_LATITUDE", "MOCOREF_HEIGHT", "MOCOREF_ANTENNA", "SWEPOS_COORDINATES"]
     settings = Settings()
     if not key in valid_keys:
@@ -134,13 +135,14 @@ def clear(keys) -> None:
 @click.argument("files", nargs=-1)
 @click.option("--antenna", help="Antenna type", default=None)
 @click.option("--radome", help="Radome type", default="NONE")
-def add(key, files, antenna: str|None, radome: str) -> None:
+@click.option("--reference-frame", "rf", help="Specify Reference Frame (default: TARGET_FRAME)", default=None)
+def add(key, files, antenna: str|None, radome: str, rf: str) -> None:
     """Add files or folders to TomoSAR. Valid keys are:
     DEM, DEMS, CANOPY, CANOPIES, MASK, MASKS, RECEIVER"""
     settings = Settings()
     # Convert to list
     files = [file for file in files]
-    settings.add(key, files, antenna=antenna, radome=radome)
+    settings.add(key, files, antenna=antenna, radome=radome, rf=rf)
     settings.save()
 
 @click.command()

@@ -6,7 +6,7 @@ from importlib.resources import path as importpath
 
 from .. import __version__
 from ..utils import warn, changed
-from ..binaries import check_required_binaries, run
+from ..manager import check_required_binaries, run
 from ..config import PACKAGE_PATH, PROJECT_PATH, LOCAL, SETTINGS_PATH, save_default
 
 def warm_cache() -> None:
@@ -106,7 +106,7 @@ def setup() -> None:
     check_required_binaries()
     if install_changed(update=False):
         try:
-            run(["make", "-f", PROJECT_PATH / "Makefile", "update"], check=True)
+            run(["make", "-f", PROJECT_PATH / "Makefile", "update"], capture=False)
         except RuntimeError:
             warn("TomoSAR project installation file updated. Run make update.")
     version = subprocess.check_output(["hatch", "version"]).decode().strip()

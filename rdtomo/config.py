@@ -13,7 +13,7 @@ SETTINGS_PATH = LOCAL / "settings.json"
 class Frequencies:
     __slots__ = ('BANDS', 'BANDWIDTHS', 'CENTRAL_FREQUENCIES', 'UNIT')
 
-    def __init__(self):
+    def __init__(self) -> None:
         st = Settings()
         object.__setattr__(self, "BANDS", tuple(
             st.RADAR["POLARIZATIONS"].keys()
@@ -102,6 +102,11 @@ class Beam:
 
 # Settings
 class Settings:
+    _implemented_frames = ["ITRF2020", "ITRF", "ETRF2020", "ETRF", "SWEREF99", "SWEREF", "EUREF-FIN", "FINREF",
+                           "EUREF-DK94", "DKREF", "LKS-94", "LITREF", "LKS-92", "LATREF", "EUREF-EST97", "ESTREF",
+                           "EUREF89", "NOREF"]
+
+    __slots__ = ("data")
     def __init__(self) -> None:
         if SETTINGS_PATH.is_file():
             with open(SETTINGS_PATH, "r") as file:
@@ -110,6 +115,38 @@ class Settings:
             save_default()
             self.data = DEFAULT
 
+    def resolve_frame(self, rf: str|None) -> str:
+        # Get default
+        if not rf:
+            rf = self.TARGET_FRAME
+        
+        # Verify implementation
+        if not rf in self._implemented_frames:
+            raise NotImplementedError(f"The reference frame {rf} is not implemented. Implemented frames: {self._implemented_frames}")
+        
+        # Aliases
+        match rf:
+            case "ITRF":
+                rf = "ITRF2020"
+            case "ETRF":
+                rf = "ETRF2020"
+            case "SWEREF":
+                rf = "SWEREF99"
+            case "FINREF":
+                rf = "EUREF-FIN"
+            case "DKREF":
+                rf = "EUREF-DK94"
+            case "LITREF":
+                rf = "LKS-94"
+            case "LATREF":
+                rf = "LKS-92"
+            case "ESTREF":
+                rf = "EUREF-EST97"
+            case "NOREF":
+                rf = "EUREF89"
+        
+        return rf
+    
     @property
     def VERBOSE(self) -> bool:
         return self.data["VERBOSE"]
@@ -139,6 +176,30 @@ class Settings:
         if not isinstance(value, str):
             raise ValueError("The MOCOREF_LATITUDE setting takes a string as value")
         self.data["MOCOREF_LATITUDE"] = value
+
+    @property
+    def REFERENCE_FRAMES(self) -> dict[str, str]:
+        return self.data["REFERENCE_FRAMES"]
+    
+    @property
+    def TARGET_FRAME(self) -> str:
+        return self.resolve_frame(self.REFERENCE_FRAMES["TARGET"])  
+    
+    @TARGET_FRAME.setter
+    def TARGET_FRAME(self, value) -> None:
+        if value not in self._implemented_frames:
+            raise NotImplementedError(f"{value} is not an implemented reference frame. Implemented frames: {self._implemented_frames}")
+        self.REFERENCE_FRAMES["TARGET"] = value
+    
+    @property
+    def MOCOREF_FRAME(self) -> str:
+        return self.resolve_frame(self.REFERENCE_FRAMES["MOCOREF"])
+    
+    @MOCOREF_FRAME.setter
+    def MOCOREF_FRAME(self, value) -> None:
+        if value not in self._implemented_frames:
+            raise NotImplementedError(f"{value} is not an implemented reference frame. Implemented frames: {self._implemented_frames}")
+        self.REFERENCE_FRAMES["MOCOREF"] = value
 
     @property
     def MOCOREF_HEIGHT(self) -> str:
@@ -301,7 +362,11 @@ class Settings:
                     }
                 return
 
-        self.FILES[key].extend(files)
+        rf = self.resolve_frame(kwargs.get("rf"))
+        if rf in self.FILES[key]:
+            self.FILES[key][rf].extend(files)
+        else:
+            self.FILES[key][rf] = files
 
     def remove(self, key, files: str|Path|list[str|Path], **kwargs) -> None:
         valid_keys = ["DEM", "DEMS", "CANOPY", "CANOPIES", "MASK", "MASKS", "RECEIVER"]
@@ -329,19 +394,23 @@ class Settings:
                         self.ANTENNAS.pop(antenna, None)
                 return
         
-        old_files = self.get(key)
-        self.set(key, [file for file in old_files if file not in files])
+        rf = self.resolve_frame(kwargs.get("rf"))
+        old_files = self.get(key).get(rf, [])
+        self.FILES[key][rf] = [file for file in old_files if file not in files]
+        # Remove empty lists
+        if not self.FILES[key][rf]:
+            self.FILES[key].pop(rf)
 
     @property
-    def DEMS(self) -> list[str]:
+    def DEMS(self) -> dict[str, list[str]]:
         return self.FILES["DEMS"]
        
     @property
-    def CANOPIES(self) -> list[str]:
+    def CANOPIES(self) -> dict[str, list[str]]:
         return self.FILES["CANOPIES"]
     
     @property
-    def MASKS(self) -> list[str]:
+    def MASKS(self) -> dict[str, list[str]]:
         return self.FILES["MASKS"]
     
     @property
@@ -420,7 +489,7 @@ def internal_file(key: str) -> str:
             filename = "CHCI83.atx"
         case "SWEPOS_COORDINATES":
             filename = "Koordinatlista_2025_10_14.csv"
-    with importpath('tomosar.resources', filename) as resource_path:
+    with importpath('rdtomo.resources', filename) as resource_path:
         return str(resource_path)
     
 DEFAULT = {
@@ -429,6 +498,10 @@ DEFAULT = {
     "MOCOREF_LATITUDE": "Latitude",
     "MOCOREF_HEIGHT": "Ellipsoidal height",
     "MOCOREF_ANTENNA": "Antenna height",
+    "REFERENCE_FRAMES": {
+        "MOCOREF": "SWEREF99",
+        "TARGET": "SWEREF99"
+    },
     "RTKP_CONFIG": internal_file("RTKP_CONFIG"),
     "DATA_DIRS": str(Path.home() / "Radar" / "Data"),
     "PROCESSING_DIRS": str(Path.home() / "Radar" / "Processing"),
@@ -442,9 +515,9 @@ DEFAULT = {
         "ANTENNAS": {
             "SATELLITES": internal_file("SATELLITES"),
         },
-        "DEMS": [],
-        "CANOPIES": [],
-        "MASKS": []
+        "DEMS": {},
+        "CANOPIES": {},
+        "MASKS": {}
     },
     "RADAR": {
         "POLARIZATIONS": {

@@ -2,20 +2,17 @@ import click
 from pathlib import Path
 import os
 import time as Time
-from datetime import datetime, timedelta, date
-import re
-import shutil
-from matplotlib import pyplot as plt
+from datetime import datetime, date
 
-from ..gnss import fetch_swepos as run_fetch_swepos, station_ppp as run_station_ppp, rtkp, reachz2rnx
+from ..gnss import fetch_swepos as run_fetch_swepos, station_ppp as run_station_ppp, reachz2rnx, generate_mocoref
 from ..trackfinding import trackfinder as run_trackfinder
 from .. import ImageInfo, TomoScenes, Settings
-from ..utils import interactive_console, local, drop_into_terminal, generate_mocoref
+from ..utils import interactive_console, local
 from ..forging import tomoforge
-from ..data import DataDir
+from ..data import LoadDir, DataDir, ProcessingDir
 
 @click.command()
-@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=DataDir), default=DataDir.cwd())
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=LoadDir), default=LoadDir.cwd())
 @click.option("--swepos", "use_swepos", is_flag=True, help="Substitute for base OBS with files from nearest Swepos station")
 @click.option("--ppp", "use_ppp", is_flag=True, help="Subsitute for mocoref data by running static PPP on base OBS")
 @click.option("-z", "-zip", "is_zip", is_flag=True, help="Force base OBS and mocoref.moco files to be generated from a Reach ZIP archive")
@@ -38,10 +35,10 @@ from ..data import DataDir
 @click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 @click.option("-f", "--force", is_flag=True, help="Force generation of processing directory (this may overwrite existing directories, but has no effect if PATH is a processing directory)")
-@click.option("-p", "--processing", "is_processing_dir", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
+@click.option("--dry", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
 @click.option("-t", "--tag", default = "", flag_value=date.today().strftime('%Y%m%d'), help="Tag processing directory with specified string (default: the date of today)")
 def init(
-    path: DataDir,
+    path: LoadDir,
     force: bool,
     use_swepos: bool,
     use_ppp: bool,
@@ -54,7 +51,7 @@ def init(
     is_hcn: bool,
     is_rtcm3: bool,
     use_header: bool,
-    is_processing_dir: bool,
+    dry: bool,
     use_broadcast: bool,
     tag: str,
     config: Path | None,
@@ -72,18 +69,16 @@ def init(
     (2) Drone IMU .bin and .log;
     (3) Drone Radar .bin, .log and .cfg;
     (4) GNSS base station;
-    (5) Mocoref data or precise position of GNSS base station; and optionally
+    (5) Mocoref data or precise position of GNSS base station; and
     (6) Data files for PPP and precise mode RTKP post processing.
     
-    If the GNSS base station file is missing, can fetch files from the nearest Swepos station,
-    and can supplement Mocoref data by performing static PPP on the base station.
+    If the GNSS base station file is missing, tomosar init can fetch files from the nearest Swepos station,
+    or supplement Mocoref data by performing static PPP on the base station.
+    
     Note that the path must point to a directory which contains exactly one set of drone data.
-    For other files, tomosar init will use the first matching file it finds.
-
-    For the GNSS base station a RINEX OBS file is prioritized over other files: HCN files and RTCM3 files are also accepted,
-    as well as Reach ZIP archives.
-
-    For mocoref data a mocoref.moco file is prioritized followed by a JSON file, with the underlying assumption that these
+    For other files, tomosar init will use the first matching file it finds. For the GNSS base station a RINEX OBS file is
+    prioritized over other files: HCN files and RTCM3 files are also accepted, as well as Reach ZIP archives. For mocoref data
+    a mocoref.moco file is prioritized followed by a JSON file, with the underlying assumption that these
     have been generated from raw mocoref data; then a LLH log is prioritized over a CSV file. If a Reach ZIP archive is
     used as the source of the GNSS base station file, the mocoref file will also be generated from there. 
     
@@ -94,94 +89,59 @@ def init(
     
     Note that tomosar init can also be run inside a processing directory, in which case it simply initiates preprocessing [ONLY GNSS IMPLEMENTED].
     Any directory inside the settings specified PROCESSING_DIRS is assumed to be a processing directory, and any directory
-    outside is by default assumed to be a data directory (this behaviour can be overridden by the --processing option)."""
+    outside is by default assumed to be a data directory (this behaviour can be overridden by the --processing option).
     
-    settings = Settings()
-    # Check if processing directory
-    if not is_processing_dir:
-        if path.is_relative_to(settings.PROCESSING_DIRS):
-            is_processing_dir = True
+    Use --tag to append the date the processing folder was initiated to the folder name (otherwise copied from the data directory), or --tag=STRING
+    to append some other tag."""
+
+    print(f"Type of {path}: {type(path)}")
+    if not isinstance(path, (DataDir, ProcessingDir)):
+        raise TypeError(f"You can only run rdtomo init on DataDir and ProcessingDir folders: {path} is a {type(path)}")
     
-    if is_processing_dir:
-        processing_dir = Path(path)
-    else:
-        processing_dir = settings.PROCESSING_DIRS / (path.name + "_" + tag)
+    
+    if isinstance(path, DataDir):
+        processing_dir = Settings().PROCESSING_DIRS / (path.name + "_" + tag)
         processing_dir.mkdir(exist_ok=force)
 
-    data = path.initiate(
-            processing_dir=processing_dir,
-            atx = atx,
-            receiver = receiver,
-            use_swepos = use_swepos,
-            use_ppp = use_ppp,
-            use_header=use_header,
-            is_zip = is_zip,
-            is_mocoref = is_mocoref,
-            is_csv = is_csv,
-            is_llh = is_llh,
-            is_json = is_json,
-            is_rnx = is_rnx,
-            is_hcn = is_hcn,
-            is_rtcm3 = is_rtcm3,
-            csv_line = csv_line,
-            offset = offset,
-            download_attempts = attempts,
-            max_downloads = downloads,
-            elevation_mask = elevation_mask,
-            minimal_overlap = minimal_overlap,
-        )
-            
-    rawdata_dir = processing_dir / "rawdata" / data.timestamp.strftime('%Y%m%d')
-    rawdata_dir.mkdir(exist_ok=force, parents=True)
-    radar_dir = rawdata_dir  / "radar1"
-    radar_dir.mkdir(exist_ok=force)
-    ground_dir = rawdata_dir / "ground1"
-    ground_dir.mkdir(exist_ok=force)
-    mocoref_dir = rawdata_dir / "mocoref"
-    mocoref_dir.mkdir(exist_ok=force)
-      
-    # Move into processing dir
-    os.chdir(processing_dir)
+        path = path.init(
+                processing_dir=processing_dir,
+                atx = atx,
+                receiver = receiver,
+                use_swepos = use_swepos,
+                use_ppp = use_ppp,
+                use_header=use_header,
+                is_zip = is_zip,
+                is_mocoref = is_mocoref,
+                is_csv = is_csv,
+                is_llh = is_llh,
+                is_json = is_json,
+                is_rnx = is_rnx,
+                is_hcn = is_hcn,
+                is_rtcm3 = is_rtcm3,
+                csv_line = csv_line,
+                offset = offset,
+                download_attempts = attempts,
+                max_downloads = downloads,
+                elevation_mask = elevation_mask,
+                minimal_overlap = minimal_overlap,
+                dry=dry,
+                rtkp_config=config,
+            )
+    # Verify that loading as Processing Directory was sucessful (failes on dry)
+    if not isinstance(path, ProcessingDir):
+        return
     
-    # Initiate preprocessing
-    if use_swepos and not elevation_mask:
-        if not use_broadcast:
-            elevation_mask = 20 # Precise 
-        else:
-            elevation_mask = 5
-    coords, gpst, q = rtkp(
-        rover_obs=data.drone_rnx_obs,
-        base_obs=data.base_obs,
-        nav_file=data.drone_rnx_nav,
-        sbs_file=data.drone_rnx_sbs,
-        sp3_file=data.sp3 if not use_broadcast else None,
-        clk_file=data.clk,
-        inx_file=data.inx,
-        precise=not use_broadcast,
-        out_path=data.drone_rnx_obs.with_suffix(".pos"),
-        download_dir=ground_dir,
-        config_file=config,
-        elevation_mask=elevation_mask,
-        mocoref_file=data.mocoref,
-        retain=True
-    )
-
-    fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8))
-    axs = axs.flatten()
-    ax = axs[0]
-    ax.plot(gpst[q==1], coords[:,2][q==1], 'g+')
-    ax.plot(gpst[q!=1], coords[:,2][q!=1], 'r+')
-    ax.set_xlabel("GPST (s)")
-    ax.set_ylabel("Ellipsoidal Height (m)")
-    ax = axs[1]
-    ax.plot(coords[:,1][q==1], coords[:,0][q==1], 'g+')
-    ax.plot(coords[:,1][q!=1], coords[:,0][q!=1], 'r+')
-    ax.set_xlabel("Longitude (deg)")
-    ax.set_ylabel("Latitude (deg)")
-    fig_name = data.timestamp.strftime("%Y-%m-%d-%H-%M-%S-position.pdf")
-    fig.savefig(radar_dir / fig_name, format="pdf")
-
-    # Continue with IMU and unimoco ... 
+    path.init(
+            config=config,
+            atx=atx,
+            receiver=receiver,
+            use_precise=not use_broadcast,
+            download_attempts=attempts,
+            max_downloads=downloads,
+            elevation_mask=elevation_mask,
+            minimal_overlap=minimal_overlap
+        )
+    
 
 @click.command()
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))
@@ -189,14 +149,14 @@ def init(
 @click.option("--rover", "rover_obs", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Target rover OBS for RTKP processing")
 @click.option("-n", "--nav", "extract_nav", is_flag=True, help="Extract NAV file")
 @click.option("--verbose", is_flag=True, help="Verbose mode.")
-def extract_reach(archive: Path, output_dir: Path, rover_obs: Path, extract_nav: bool, verbose: bool) -> None:
+def extract_reach(archive: Path, output_dir: Path|None, rover_obs: Path|None, extract_nav: bool, verbose: bool) -> None:
     """Extracts a Reach ZIP archive to produce:
     (1) A RINEX OBS file for a single site,
     (2) A mocoref.moco for the OBS file, and
     (3) A RINEX NAV file (optional).
     
-    Optionally takes a RINEX OBS file as input to extract from the archive the OBS file which has the greatest overlap with the
-    input RINEX file. Otherwise extracts the longest segment."""
+    Optionally takes a rover OBS file as input to extract from the archive the OBS file which has the greatest overlap with the
+    input rover OBS. Otherwise extracts the longest segment."""
 
     reachz2rnx(archive=archive, output_dir=output_dir, rnx_file=rover_obs, nav=extract_nav, verbose=verbose)
 
@@ -278,7 +238,7 @@ def station_ppp(
         output = obs_file.with_suffix(".out")
     if output == False:
         output = None
-    run_station_ppp(
+    results = run_station_ppp(
         obs_path=obs_file,
         navglo_path=navglo,
         atx_path=atx,
@@ -291,6 +251,8 @@ def station_ppp(
         retain=retain,
         mocoref=make_mocoref
     )
+
+    print(f"Determined position:\n   lat: {results['lat']}\n   lon: {results['lon']}\n   h  : {results['h']}")
 
 @click.command()
 @click.argument("path", type=click.Path(exists=True, path_type=Path))

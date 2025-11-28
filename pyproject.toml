@@ -3,16 +3,16 @@ requires = ["hatchling","hatch-vcs","wheel"]
 build-backend = "hatchling.build"
 
 [project]
-name = "tomosar"
+name = "rd-tomo"
 description = "Toolbox for tomographic SAR processing from RD350 drone data"
 authors = [
     {name = "Ansgar Jörgenfelt", email = "ansgar.jorgenfelt@slu.se"}
 ]
-keywords = ["SAR", "tomographic", "tomogram", "Radaz", "RD350", "radar", "microwaves", "processing"]
+keywords = ["SAR", "tomographic", "tomography", "tomogram", "Radaz", "RD350", "radar", "microwaves", "processing"]
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "numpy (>=2.3.3,<3.0.0)",
     "pandas (>=2.3.3,<3.0.0)",
@@ -31,11 +31,12 @@ dependencies = [
     "rich (>=14.1.0,<15.0.0)",
     "hatch (>=1.5.1, <2.0.0)",
     "PyQt5 (>=5.15.11, <6.0.0)",
+    "laspy (>=2.6.1, <3.0.0)",
+    "pyyaml (>=6.0.3, <7.0.0)",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Programming Language :: Python",
-    "Private :: Do Not Upload",
+    "Programming Language :: Python"
 ]
 dynamic=[
     "version",
@@ -45,12 +46,12 @@ dynamic=[
 dev = ["fawltydeps", "vermin", "pyubx2"]
 
 [project.scripts]
-tomosar = "tomosar.toolbox.tomosar:tomosar"
+rdtomo = "rdtomo.toolbox.rdtomo:rdtomo"
 
 [project.urls]
-Homepage = "https://github.com/ansgarj/TomoSAR.git"
-Repository = "https://github.com/ansgarj/TomoSAR.git"
-Changelog = "https://github.com/ansgarj/TomoSAR/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ansgarj/rd-tomo.git"
+Repository = "https://github.com/ansgarj/rd-tomo.git"
+Changelog = "https://github.com/ansgarj/rd-tomo/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 source = "vcs"
@@ -60,4 +61,4 @@ fallback-version = "0.0.0"
 version_scheme = "no-guess-dev"
 
 [tool.hatch.build.hooks.vcs]
-version-file = "tomosar/version.py"
+version-file = "rdtomo/version.py"

@@ -2,36 +2,58 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.7] - 2025-11-14
+## [0.1.0] - 2025-11-28
+
+### Note
+- The new repo name is now `rd-tomo` and the Python module and CLI tool go under the common name `rdtomo` in order to avoid confusion with other TomoSAR related projects. 
 
 ### Added
-- `tomosar.gnss.modify_config` (see below)
-- `tomosar test precise-rktp` which can be used to test precise RTKP mode against broadcast to determine which to use
-- `tomosar test rtkp` which tests the internal rktp processing (with absolute antenna calibration) against raw RTKLIB `rnx2rtkp`, and optionally tests precise mode on internal or both
-- Added automatic UTM zone detection to `tomosar.trackfinder._get_azimuth`
+- Implemented a unified Reference Frame workflow via `rdtomo.transformers.change_rf` and Settings to select which Reference Frame mocoref data is collected in and which Reference Frame is the target (output); implemented Reference Frames are ITRF2020, ETRF2020, SWEREF99, EUREF89, EUREF-FIN, EUREF-EST97, EUREF-DK94, LKS-94, LKS-92.
+- `rdtomo.gnss.modify_config` (see below)
+- `rdtomo test precise-rktp` which can be used to test precise RTKP mode against broadcast to determine which to use
+- `rdtomo test rtkp` which tests the internal RTKP processing (with absolute antenna calibration) against raw RTKLIB `rnx2rtkp`, and optionally tests precise mode on internal or both
+- Added automatic projected map coordinate detection to `rdtomo.trackfinder._get_azimuth`
+- `rdtomo.data` module (see `rdtomo.resources` for old `rdtomo.data` module), with the following classes  `LoadDir(pathlib.Path)`, `DataDir(LoadDir)`, `ProcessingDir(LoadDir)`, `TomoDir(LoadDir)`, `TomoArchive(LoadDir)` and `DroneData`, where `LoadDir` dispatches to either `DataDir`, `ProcessingDir`, `TomoDir` or `TomoArchive`; the later classes function as interface with the respective directories; `DroneData` is a dataclass containing pointers to the files necessary for preprocessing and some helpful additionals
+- `tomomsar.manager` module which contains basic file and resource manager functions (including the `resource` and `tmp` context managers, dependency checks and the basic `run` command for 3rd party binaries)
+- `rdtomo.dem` module for DEM manipulation (resource management is handled in `rdtomo.manager`), currently mostly a placeholder
 
 ### Changed
-- `tomosar.binaries.tmp` no longer creates parents to temporary directories (which were not temporary), but fails if all parents do not exist when `allow_dir=True`
-- `tomosar.gnss.station_ppp` now allows input of SP3 and/or CLK files instead of always downloading, and accepts full SP3 files as input as well as IONEX files; it also returns the SP3 and CLK paths if retain is used (but not rotation matrix and distance). The output directory for the files can also be specified without specifying a path for `.out` file by inputing a directory as `out_path`, or specified separately by the new `download_dir` parameter.
-- `tomosar.binaries.ppp` now also accepts full SP3 files as input (instead of only ORBIT/CLK pairs) as well as IONEX files
-- Moved config file resource management from `tomosar.binaries.rnx2rtkp` to `tomosar.gnss.rtkp` and changed from multiple internal config files to dynamically updating the temporary config file copy by `tomosar.gnss.modify_config`
-- `tomosar.gnss.rtkp` now optionally allows input of SP3 and CLK files or downloading of SP3 and CLK files to run in precise mode, and also allows input of IONEX files
-- `tomosar.binaries.rnx2rtkp` now allows input of SP3 and CLK files
-- `tomosar.gnss.rtkp` now handles `out_path` and output directory similarly as `tomosar.gnss.station_ppp`, and if `out_path` is `None` then `tomosar.binaries.rnx2rtkp` captures output instead of writing a `.pos` file (**Note**: This means that the counter while it is running is not visible if no `out_path` is provided, but the total Q1 percentage is still displayed after finishing)
-- Renamed `tomosar.gnss.read_pos_file` to `tomosar.gnss.read_rnx2rtkp_out` and `tomosar.gnss.read_out_file` to `tomosar.gnss.read_glab_out` and changed both to distinguish between file and stdout input by whether it is a string or a `pathlib.Path` object
-- `tomosar init` now uses precise ephemeris data in its RTKP post processing by default
-- Changed `tomosar.trackfinding.analyze_spiral` to calculate flight altitude, radius and azimuth in the local ENU frame of the center
-- `tomosar.gnss.merge_ephemeris` now calls specific functions to splice SP3, CLK and IONEX files (`tomosar.binaries.splice_sp3`, `tomosar.binaries.splice_clk` and `tomosar.binaries.splice_inx`)
-- Renamed `tomosar.gnss.fetch_sp3_clk` to `tomosar.gnss.fetch_cod_files` and it now fetches COD Europe files for orbits (SP3), clock corrections (CLK) and Ionosphere maps (IONEX).
-- Removed buffer on downloading ephemeris and Ionosphere files (`tomosar.gnss.fetch_cod_files`)
+- `rdtomo` now requires Python >=3.12 since it subclasses `pathlib.Path` directly
+- The old `rdtomo.data` module is renamed to `rdtomo.resources`
+- Removed `rdtomo.binaries`: some of its content is in `rdtomo.manager` and the gnss processing moved into `rdtomo.gnss` which now contains all GNSS processing and related functions (including `generate_mocoref`)
+- `rdtomo.transformers` now uses a unified function interface instead of providing `pyproj.Transformer` objects
+- The `rdtomo.transformers.geo_to_ecef` and `rdtomo.transformers.ecef_to_geo` now also optionally allows specifying of the Reference Frame, and correctly handles transformations within that Frame
+- `rdtomo.manager.tmp` no longer creates parents to temporary directories (which were not temporary), but fails if all parents do not exist when `allow_dir=True`
+- `rdtomo.gnss.station_ppp` now allows input of SP3 and/or CLK files instead of always downloading, and accepts full SP3 files as input as well as IONEX files; it also returns a dict with various data instead. The output directory for the files can also be specified without specifying a path for `.out` file by inputing a directory as `out_path`, or specified separately by the new `download_dir` parameter.
+- `rdtomo.gnss.ppp` now also accepts full SP3 files as input (instead of only ORBIT/CLK pairs) as well as IONEX files
+- Moved config file resource management from `rdtomo.gnss.rnx2rtkp` to `rdtomo.gnss.rtkp` and changed from multiple internal config files to dynamically updating the temporary config file copy by `rdtomo.gnss.modify_config`
+- `rdtomo.gnss.rtkp` now optionally allows input of SP3 and CLK files or downloading of SP3 and CLK files to run in precise mode, and also allows input of IONEX files
+- `rdtomo.gnss.rnx2rtkp` now allows input of SP3 and CLK files
+- `rdtomo.gnss.rtkp` now handles `out_path` and output directory similarly as `rdtomo.gnss.station_ppp`, and if `out_path` is `None` then `rdtomo.gnss.rnx2rtkp` captures output instead of writing a `.pos` file (**Note**: This means that the counter while it is running is not visible if no `out_path` is provided, but the total Q1 percentage is still displayed after finishing)
+- Renamed `rdtomo.gnss.read_pos_file` to `rdtomo.gnss.read_rnx2rtkp_out` and `rdtomo.gnss.read_out_file` to `rdtomo.gnss.read_glab_out` and changed both to distinguish between file and stdout input by whether it is a string or a `pathlib.Path` object
+- `rdtomo init` now uses precise ephemeris data in its RTKP post processing by default
+- Changed `rdtomo.trackfinding.analyze_spiral` to calculate flight altitude, radius and azimuth in the local ENU frame of the center
+- `rdtomo.gnss.merge_ephemeris` now calls specific functions to splice SP3, CLK and IONEX files (`rdtomo.gnss.splice_sp3`, `rdtomo.gnss.splice_clk` and `rdtomo.gnss.splice_inx`)
+- Renamed `rdtomo.gnss.fetch_sp3_clk` to `rdtomo.gnss.fetch_cod_files` and it now fetches COD Europe files for orbits (SP3), clock corrections (CLK) and Ionosphere maps (IONEX).
+- Removed buffer on downloading ephemeris and Ionosphere files (`rdtomo.gnss.fetch_cod_files`)
+- `Settings` and all classes in `rdtomo.core` now have `__slots__` preventing arbitrary attribute assignment
+- `rdtomo.manager.resource` no longer takes the `standard` keyword for "RTKP_CONFIG"
+- `rdtomo.manager.resource` now allows all flags to be passed as parameters (casefolded, i.e. lowercase), which takes precedence over the path specified by Settings
+- `rdtomo.gnss.rtkp` now optionally takes `atx` and `receiver` keywords pointing to external ATX files
+- `.tomo` directories should now be generated and maintained as read-only by `rdtomo` to avoid accidental modification of the internal structure
+- DEMS, CANOPIES and MASKS in the Settings now have a dict of lists instead of a list as entries, indexed by the Reference Frame. When a path is added or removed, unless the Reference Frame is specified, it is added to or removed from the TARGET_FRAME. **Note**: `rdtomo` does not warp the files to convert them to another Reference Frame, but simply uses the dict as a mapping of where to find files in the correct Frame –– you must warp them yourselves if you plan to change Reference Frame.
 
 ### Fixed
-- Fixed bug in `tomosar --version` that caused it to sometimes display the previous version
-- Fixed a fatal bug in `tomosar init` caused by a mixing up of the GNSS base and the `mocoref.moco` after the last update
-- `tomosar.gnss.merge_ephemeris` and `tomosar.binaries.merge_eph` now merge ephemeris files without intermittent headers and EOF markers (which ensures that RTKLIB can parse them as well as gLAB)
-- Fixed bug in `tomosar.trackfinding.analyze_linear` that caused e.g. `tomosar trackfinder` to incorrectly parse linear tracks
+- `rdtomo.gnss.station_ppp` (`rdtomo.gnss.ppp`) now achieves subcentimeter precision on a test RINEX OBS file of 4h length when the antenna has absolute callibration data, thanks to corrections in Reference Frame handling
+- Fixed bug in `rdtomo --version` that caused it to sometimes display the previous version
+- Fixed a fatal bug in `rdtomo init` caused by a mixing up of the GNSS base and the `mocoref.moco` after the last update
+- `rdtomo.gnss.merge_ephemeris` and the splice functions it calls now merge ephemeris files without intermittent headers and EOF markers (which ensures that RTKLIB can parse them as well as gLAB)
+- Fixed bug in `rdtomo.trackfinding.analyze_linear` that caused e.g. `rdtomo trackfinder` to incorrectly parse linear tracks
 
 ## [0.0.6] - 2025-11-06
+
+### Note
+- In v0.0.6 and older `rdtomo` went under the name of `tomosar`
 
 ### Added
 - `tomosar test station-ppp` which runs `station-ppp` and compares against ground truth as found in a mocoref data file, can also be run directly on Reach ZIP archives without unpacking them (does not require separate mocoref data)

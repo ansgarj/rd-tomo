@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from multiprocessing import Pool, Manager
 from datetime import datetime, timedelta
-from pyproj import Transformer, CRS
+from pyproj import Transformer
 from scipy.optimize import minimize
 from pathlib import Path
 import math
@@ -13,9 +13,9 @@ from collections import defaultdict, Counter
 import json
 from matplotlib.figure import Figure
 
-from .utils import find_inliers, format_duration, add_meta, ecef2enu
-from .transformers import geo_to_ecef
-from .binaries import elevation
+from .utils import find_inliers, format_duration, add_meta
+from .transformers import geo_to_ecef, geo_to_map, ecef_to_enu
+from .dem import elevation
 from .apperture import SARModel
 from .config import Frequencies
 FREQUENCIES = Frequencies()
@@ -162,40 +162,8 @@ def _get_azimuth(spiral_track: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, fl
     lat = spiral_track["lat (deg)"].to_numpy()
     lon = spiral_track["lon (deg)"].to_numpy()
 
-    # Use pyproj to convert to UTM
-    def to_utm(lat: np.ndarray, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Returns the UTM CRS and projected coordinates for a given latitude and longitude.
-        Handles Norway and Svalbard special cases.
-        """
-        # Compute base zone
-        zone = int((lon[0] + 180) / 6) + 1
-
-        # Handle Norway and Svalbard exceptions
-        # Norway: Zone 32 for 56°N–64°N and 3°E–12°E
-        if 56 <= lat[0] < 64 and 3 <= lon[0] < 12:
-            zone = 32
-        # Svalbard: Zones 31–37 for 72°N–84°N
-        if 72 <= lat[0] < 84:
-            if lon[0] >= 0 and lon[0] < 9:
-                zone = 31
-            elif lon[0] < 21:
-                zone = 33
-            elif lon[0] < 33:
-                zone = 35
-            else:
-                zone = 37
-
-        # Hemisphere and EPSG code
-        epsg = 32600 + zone if lat[0] >= 0 else 32700 + zone
-        crs = CRS.from_epsg(epsg)
-
-        # Transform coordinates
-        transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-        x, y = transformer.transform(lon, lat)
-
-        return x, y
-    x, y = to_utm(lat=lat, lon=lon)
+    # Convert to UTM
+    x, y = geo_to_map(lat=lat, lon=lon)
     coords = np.column_stack((x, y))
 
     # Initial guess: centroid
@@ -367,7 +335,7 @@ def analyze_spiral(track: pd.DataFrame, track_info: dict, base_ele: float, dem_p
     _, _, lat0, lon0 = _get_azimuth(track)
     h0 = elevation(lat0, lon0, dem_path)
     # Calculate ENU distance vector from center to track
-    diff = ecef2enu(lat0, lon0) @ (geo_to_ecef.transform(track['lon (deg)'].to_numpy(), track['lat (deg)'].to_numpy(), track['alt (m)'].to_numpy()) - geo_to_ecef.transform(lon0, lat0, h0))
+    diff = ecef_to_enu(lat0, lon0) @ (geo_to_ecef(track['lon (deg)'].to_numpy(), track['lat (deg)'].to_numpy(), track['alt (m)'].to_numpy()) - geo_to_ecef(lon0, lat0, h0))
     flight_alt = diff[2] # Flight altitude relative center point (m)
     r = np.sqrt(diff[0]**2 + diff[1]**2) # radius relative center point (m)
     az = np.unwrap(np.arctan2(diff[0], diff[1])) * 180 / np.pi # azimuth relative center point (deg)

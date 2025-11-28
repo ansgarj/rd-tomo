@@ -6,7 +6,7 @@ import socket
 import shutil
 from pathlib import Path
 from datetime import datetime, date, time
-from typing import Dict, ClassVar
+from typing import Dict, ClassVar, TypeAlias
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
@@ -22,12 +22,13 @@ import copy
 from typing import KeysView, ValuesView, ItemsView
 
 from .utils import warn, collect_statistics, estimaterr, apply_variable_descriptions, parse_datetime_string
+from .manager import writable
 from .tomogram_processing import multilook, filter
 from .apperture import SARModel
 from .config import Settings
 
 ### Custom classes
-@dataclass
+@dataclass(slots=True)
 class ImageInfo:
     filename: str 
     folder: str = "."
@@ -308,7 +309,7 @@ class ImageInfo:
                 return True
         return False
 
-@dataclass
+@dataclass(slots=True)
 class SliceInfo:
     slices: list[ImageInfo] = field(default_factory=list)
 
@@ -477,7 +478,7 @@ class SliceInfo:
             return False
         return all(slice in other.slices for slice in self.slices) and len(self.slices) == len(other.slices)
 
-@dataclass
+@dataclass(slots=True)
 class Mask:
     name: str = ""
     id: int = 0
@@ -504,7 +505,7 @@ class Mask:
         return masked_tomogram
 
 class Masks:
-    
+    __slots__ = ("parent", "masks")
     def __init__(self, parent: TomoInfo = None, masks: dict[str,list[Mask]] = defaultdict[list]):
         self.parent: TomoInfo = parent
         self.masks: dict[str,list[Mask]] = masks
@@ -577,7 +578,7 @@ class Masks:
     def __bool__(self):
         return bool(self.masks)
 
-@dataclass
+@dataclass(slots=True)
 class Tomograms:
     raw: np.ndarray | None = field(default=None, repr=False)
     multilooked: np.ndarray | None = field(default=None, repr=False)
@@ -698,7 +699,7 @@ class Tomograms:
     def get(self, key):
         return getattr(self, key, None)
 
-@dataclass
+@dataclass(slots=True)
 class Multilook:
     parent: "TomoInfo" = field(repr=False,compare=False)
     factor: int = 1
@@ -745,7 +746,7 @@ class Multilook:
         new_multilook = Multilook(parent=self.parent, factor=self.factor)
         return new_multilook
 
-@dataclass
+@dataclass(slots=True)
 class Filter:
     parent: 'TomoInfo' = field(repr=False)
     sigma_xi: float = 0.9
@@ -798,7 +799,7 @@ class Filter:
                             point_percentile=self.point_percentile, point_threshold=self.point_threshold)
         return new_filter
 
-@dataclass
+@dataclass(slots=True)
 class TomoStats:
     parent: TomoInfo | SceneStats = field(repr=False,compare=False)
     stats: Dict[str, pd.DataFrame] = field(default_factory=dict)
@@ -900,7 +901,7 @@ class TomoStats:
     def __bool__(self):
         return bool(self.stats)
 
-@dataclass
+@dataclass(slots=True)
 class SceneStats:
     id: str
     stats: dict[str, TomoStats] = field(init=False)
@@ -963,7 +964,7 @@ class SceneStats:
 
         return scene_stats
     
-@dataclass
+@dataclass(slots=True)
 class TomoInfo:
     band: str = None
     width: float = None
@@ -1155,7 +1156,7 @@ class TomoInfo:
         return tomo
 
     @classmethod
-    def load(cls, path: str|Path, cached: bool = False) -> 'TomoInfo':
+    def load(cls, path: str|Path, cached: bool = True) -> 'TomoInfo':
         """
         Create a TomoInfo instance from a band  sub-directory of a .tomo directory.
         Path validation is delegated by TomoScene.load() and this method should only be called from there.
@@ -1365,20 +1366,20 @@ class TomoInfo:
             return False
         return all(self.get(key) == other.get(key) for key in TomoInfo.TOMOGRAM_PARAMETERS)
 
-@dataclass
+@dataclass(slots=True)
 class TomoScene:
     id: str = ""
     date: datetime = None
     spiral: int = None
     tomograms: Dict[str, TomoInfo] = field(default_factory=dict)
     _info: Dict[str, float] = field(default_factory=dict)
-    moco: pd.DataFrame = field(default_factory=pd.DataFrame)
+    track: pd.DataFrame = field(default_factory=pd.DataFrame)
     _model: SARModel = None
     
     @property
     def model(self) -> SARModel:
         if self._model is None:
-            self._model = SARModel(self.moco)
+            self._model = SARModel(self.track)
         return self._model
 
     def items(self):
@@ -1424,7 +1425,7 @@ class TomoScene:
         return new_scene
     
     @classmethod
-    def load(cls, path: str|Path = '.', cached: bool = False, npar: int = os.cpu_count()) -> 'TomoScene':
+    def load(cls, path: str|Path = '.', cached: bool = True, npar: int = os.cpu_count()) -> 'TomoScene':
         """
         Create a TomoScene instance from a .tomo directory.
         """
@@ -1476,24 +1477,27 @@ class TomoScene:
     
     def save(self, folder: str|Path = "."):
         folder = Path(folder)
-        tomo_dir = folder  / f"{self.id}.tomo"
+        if folder.suffix == ".tomo":
+            tomo_dir = folder
+        else:
+            tomo_dir = folder  / f"{self.id}.tomo"
         tomo_dir.mkdir(exist_ok=True)
+        with writable(tomo_dir) as td:  
+            # Save SAR parameters
+            with open(td / 'flight_info.json', 'w') as f:
+                json.dump({
+                    'date': self.date.isoformat(timespec='seconds'),
+                    'spiral': self.spiral,
+                    'info': self._info
+                    }, f, indent=4)
 
-        # Save SAR parameters
-        with open(tomo_dir / 'flight_info.json', 'w') as f:
-            json.dump({
-                'date': self.date.isoformat(timespec='seconds'),
-                'spiral': self.spiral,
-                'info': self._info
-                }, f, indent=4)
+            # Save .moco cut explicitly as .csv
+            self.track.to_csv(td / 'moco_cut.csv', index=False)
 
-        # Save .moco cut explicitly as .csv
-        self.moco.to_csv(tomo_dir / 'moco_cut.csv', index=False)
-
-        # Save tomogram data
-        for band, tomo in self.tomograms.items():
-            band_dir = tomo_dir / band
-            tomo.save(band_dir)
+            # Save tomogram data
+            for band, tomo in self.tomograms.items():
+                band_dir = tomo_dir / band
+                tomo.save(band_dir)
     
     def __iter__(self):
         return iter(self.tomograms)
@@ -1504,8 +1508,11 @@ class TomoScene:
     def __setitem__(self, band: str, value: TomoInfo):
         self.tomograms[band] = value
 
-@dataclass
+@dataclass(slots=True)
 class TomoScenes:
+    scenes: SceneMap
+
+    KEY_TYPES: ClassVar = datetime|date|tuple[date,time]|tuple[datetime,int]|tuple[date,time,int]
     def __init__(self, scenes: list[TomoScene]):
         self.scenes = {}
         for scene in scenes:
@@ -1513,9 +1520,6 @@ class TomoScenes:
             if key in self.scenes:
                 raise ValueError("Only lists of unique TomoScene objects can be used to initialize a TomoScenes object.")
             self.scenes[key] = scene
-
-
-    KEY_TYPES: ClassVar = datetime|date|tuple[date,time]|tuple[datetime,int]|tuple[date,time,int]
 
     def items(self):
         return self.scenes.items()
@@ -1538,30 +1542,38 @@ class TomoScenes:
     def list(self):
         print(f"Containing {len(self)} scenes:")
         for i, scene in enumerate(self):
-            print(f"\t{i}: {scene.id} with bands {scene.bands}")
+            print(f"   {i}: {scene.id} with bands {scene.bands}")
     
     def update(self):
         for scene in self.values():
             scene.update()
     
+    def add(self, *scenes: Scenes) -> None:
+        if not scenes:
+            raise ValueError("At least one scene must be provided") 
+        new_scenes = scene_map(scenes)
+        self.scenes = merge_scene_maps([self.scenes, new_scenes])
+
     @classmethod
-    def load(self, path: str|Path = ".", cached: bool = False, npar: int = os.cpu_count) -> 'TomoScenes':
+    def load(self, path: str|Path = ".", cached: bool = True, npar: int = os.cpu_count) -> 'TomoScenes':
         path = Path(path)
-        tomo_scenes = TomoScenes()
+        tomo_scenes = []
         if path.is_dir():
             tomo_dirs = [d for d in path.iterdir() if d.is_dir() and d.suffix == '.tomo']
-
-            with ThreadPoolExecutor(max_workers=npar) as executor:
-                interior_npar = npar // len(tomo_dirs)
-                future_to_path = {executor.submit(TomoScene.load, tomo_path, cached=cached, npar=interior_npar): tomo_path for tomo_path in tomo_dirs}
-                for future in as_completed(future_to_path):
-                    tomo_path = future_to_path[future]
-                    try:
-                        scene = future.result()
-                        tomo_scenes.append(scene)
-                    except Exception as e:
-                        print(f"Warning: Failed to load {tomo_path}: {e}")
-
+            if tomo_dirs:
+                with ThreadPoolExecutor(max_workers=npar) as executor:
+                    interior_npar = npar // len(tomo_dirs)
+                    future_to_path = {executor.submit(TomoScene.load, tomo_path, cached=cached, npar=interior_npar): tomo_path for tomo_path in tomo_dirs}
+                    for future in as_completed(future_to_path):
+                        tomo_path = future_to_path[future]
+                        try:
+                            scene = future.result()
+                            tomo_scenes.append(scene)
+                        except Exception as e:
+                            warn(f"Failed to load {tomo_path}: {e}")
+        else:
+            raise ValueError(f"{path} is not a directory")
+        tomo_scenes = TomoScenes(tomo_scenes)
         return tomo_scenes
   
     @staticmethod
@@ -1708,6 +1720,51 @@ class TomoScenes:
         return all(scene in other.scenes for scene in self.scenes) and len(self) == len(other)
 
 # Helper functions
+## SceneMap for TomoScenes
+SceneMap: TypeAlias = dict[tuple[date, time, int], TomoScene]
+SceneObj: TypeAlias = TomoScene | TomoScenes | SceneMap
+Scenes: TypeAlias = SceneObj | list[SceneObj] | tuple[SceneObj, ...] | set[SceneObj]
+
+def merge_scene_maps(mappings: list[SceneMap]) -> SceneMap:
+    merged = {}
+    for map in mappings:
+        overlap = merged.keys() & map.keys()
+        if overlap:
+            raise KeyError(f"Duplicate keys found: {overlap}")
+        merged.update(map)
+    return merged
+    
+def scene_map(obj: object) -> SceneMap:
+    """
+    Validate that obj is a SceneMap or convert to one if possible:
+    - Must be a dict
+    - Keys must be (date, time, int)
+    - Values must be TomoScene
+    Returns obj typed as SceneMap if valid, else raises TypeError/ValueError.
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if not (isinstance(k, tuple) and len(k) == 3):
+                raise ValueError(f"Invalid key: {k} (must be tuple of (date, time, int))")
+            d, t, i = k
+            if not isinstance(d, date) or not isinstance(t, time) or not isinstance(i, int):
+                raise ValueError(f"Invalid key types: {k}")
+            if not isinstance(v, TomoScene):
+                raise ValueError(f"Invalid value type: {type(v).__name__} (must be TomoScene)")
+            if not k == (v.date.date(), v.date.time(), v.spiral):
+                raise ValueError(f"Key {k} does not match scene: {v}")
+            mapping = obj
+    elif isinstance(obj, TomoScene):
+        mapping = {(obj.date.date(), obj.date.time(), obj.spiral): obj}
+    elif isinstance(obj, TomoScenes):
+        mapping = obj.scenes
+    elif isinstance(obj, (list, tuple, set)):
+        mappings = []
+        for s in obj:
+            mappings.append(scene_map(s))
+        merge_scene_maps(mappings)
+    return mapping
+
 ## Regrouping a grouped SliceInfo
 def regroup(grouped_dict: Dict[str,SliceInfo], keys: str | list[str], list: bool = False):
     regrouped = defaultdict(lambda: defaultdict(SliceInfo))
@@ -2019,7 +2076,7 @@ def tomoinfo(path: str|Path) -> dict:
 
 def tomoload(path: str = '.', cached: bool = True, npar: int = os.cpu_count()) -> TomoScene | TomoScenes:
     """
-    Loads TomoScene instances from .tomo directories, collecting them into a TomoScenes if multple are found.
+    Loads TomoScene instances from .tomo directories, collecting them into a TomoScenes if multiple are found.
     """
     # yyyy-mm-dd-HH-MM-SS-filename_processing-time.tomo/
     #   |-- flight_info.json

@@ -7,6 +7,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from skimage.measure import shannon_entropy
 from scipy.special import polygamma
@@ -15,8 +16,6 @@ from scipy.linalg import svd
 from scipy.optimize import least_squares
 from scipy.ndimage import binary_closing
 from sklearn.linear_model import RANSACRegressor, LinearRegression
-from sklearn.cluster import DBSCAN
-import json
 import inspect
 from datetime import timedelta, datetime, date, time, timezone
 import math
@@ -29,11 +28,10 @@ import code
 import sys
 import inspect
 import hashlib
+from typing import TypeAlias
 
 from .tomogram_processing import circularize
-from .transformers import geo_to_ecef, ecef_to_geo
-from .config import Settings
-
+ 
 # Warning message
 def warn(message) -> None:
     # Get the current stack
@@ -176,16 +174,6 @@ def changed(hash_file: Path|str, input: list[Path|str]|Path|str, generate_hash: 
 
     return generate_hash
 
-# Transformation to local ENU frame from ECEF
-def ecef2enu(lat: float, lon: float) -> np.ndarray:
-    lon = np.radians(lon)
-    lat = np.radians(lat)
-    return np.array([
-        [-np.sin(lon), np.cos(lon), 0],
-        [-np.cos(lon)*np.sin(lat), -np.sin(lon)*np.sin(lat), np.cos(lat)],
-        [np.cos(lon)*np.cos(lat), np.sin(lon)*np.cos(lat), np.sin(lat)]
-    ])
-
 # Find change points in linear statistics
 def find_inliers(signal, min_samples: int|float = 0.5, residual_threshold: float|None = None,
                  relative_threshold: float|None=0.2):
@@ -305,7 +293,7 @@ def collect_statistics(tomogram: np.ndarray, height: np.ndarray, circ: bool = Tr
     return df
 
 # RR estimation
-def estimaterr(tomogram, NNL=1, ds=1, tolerance=1E-2, npar=os.cpu_count()):
+def estimaterr(tomogram: npt.NDArray, NNL: int = 1, ds: int = 1, tolerance: float = 1E-2, npar: int = os.cpu_count()) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
     if isinstance(ds, (list, tuple, np.ndarray)) and any(np.array(ds) > 1):
         tomogram = tomogram[::ds[0], ::ds[1], :]
     elif isinstance(ds, int) and ds > 1:
@@ -326,14 +314,14 @@ def estimaterr(tomogram, NNL=1, ds=1, tolerance=1E-2, npar=os.cpu_count()):
 
     return RR, cFactor
 
-def _estimaterr_slice(I, npar, X0=None, ds=1, tolerance=1E-2):
+def _estimaterr_slice(I: npt.NDArray, npar: int, X0: float|None, ds=1, tolerance: float = 1E-2):
 
     # Noise model function
-    def noise_fun(x, xdata):
+    def noise_fun(x, xdata) -> npt.NDArray:
         return x[1] * np.sqrt(x[0] + xdata) + x[2]
 
     # Subsampling function
-    def subsample(I, ds):
+    def subsample(I, ds) -> npt.NDArray:
         return I[::ds, ::ds]
     
     if X0 is None:
@@ -358,7 +346,7 @@ def _estimaterr_slice(I, npar, X0=None, ds=1, tolerance=1E-2):
     J0 = J0[:l, :l]
     M = int(3 * l / 4)
 
-    def process_noise(i):
+    def process_noise(i) -> np.floating:
         L_i = L[i]
         g_i = gamma.rvs(L_i, scale=1/L_i, size=J0.shape)
         J = 10 * np.log10(g_i * J0)
@@ -402,7 +390,7 @@ def format_duration(seconds: int|float|timedelta, print_days: bool = False) -> s
 
 # Helper function to convert 'dd:hh:mm:ss' or 'hh:mm:ss' to seconds
 def duration_seconds(duration: str) -> int:
-    match = re.search(r'(\d{2}):(\d{2}):(\d{2})(?::(\d{2}))?')
+    match = re.search(r'(\d{2}):(\d{2}):(\d{2})(?::(\d{2}))?', duration)
     num_matched = sum(1 for g in match.groups() if g is not None)
     t = 0
     if num_matched == 3:
@@ -782,231 +770,91 @@ def extract_datetime(filename) -> datetime | None:
        return dt.replace(tzinfo = timezone.utc)
     return None
 
-# Function to read mocoref data from a data file
-def generate_mocoref(data: str|Path|dict|pd.DataFrame, type: str = None, output_dir: Path|str|None = None, line: int = 1, pco_offset: float = -0.079, tstart: datetime|None = None, tend: datetime|None = None, tolerance: float = 0.2, generate: bool = True, verbose: bool = False) -> tuple[tuple[float, float, float], Path]:
-    """Reads mocoref data from a data file. Valid types: CSV, JSON, LLH and mocoref. If not specified attempts to determine file type from file extension.
-    The line parameter specifies which line in a CSV file the mocoref data is read from. Optionally generates a mocoref.moco file.
-    
-    If data is dict or DataFrame instead of Path or string, mocoref data will be read from the dict or DataFrame instead.
-    A DataFrame will be interpreted as having the mocoref data in a single line if the line parameter is positive, and as being an LLH log if it is zero.
-    
-    LLH data read from a file is assumed to lack a header and have identical columns to Reach RS3 output:
-    date, time, latitude, longitude, height, Q, satellites, sdn, sde, sdu, sdne, sdeu, sdun, age, AR_ratio.
+# GPS time manipulation
+datetime_object: TypeAlias = datetime | date | np.datetime64 | npt.NDArray[np.datetime64]
 
-    If tstart and/or tend are specified the LLH data will be limited to matching timestamps, otherwise the entire log is used. Note however that from within the timestamps used,
-    there is extracted the position which gives the LONGEST TOTAL FIX with a tolerance of position variation specified by the tolerance parameter.
-    
-    The pco_offset parameter allows the user to specify a vertical PCO offset between the receiver used to record mocoref data and the receiver used in drone processing.
-    Note: this applies to CSV files ONLY.
-    
+GPS_EPOCH: np.datetime64 = np.datetime64('1980-01-06')
+LEAP_SECONDS = np.array([
+    np.datetime64('1981-07-01'), np.datetime64('1982-07-01'), np.datetime64('1983-07-01'),
+    np.datetime64('1985-07-01'), np.datetime64('1988-01-01'), np.datetime64('1990-01-01'),
+    np.datetime64('1991-01-01'), np.datetime64('1992-07-01'), np.datetime64('1993-07-01'),
+    np.datetime64('1994-07-01'), np.datetime64('1996-01-01'), np.datetime64('1997-07-01'),
+    np.datetime64('1999-01-01'), np.datetime64('2006-01-01'), np.datetime64('2009-01-01'),
+    np.datetime64('2012-07-01'), np.datetime64('2015-07-01'), np.datetime64('2017-01-01')
+])
+
+def _to_np_datetime64(obj: object) -> np.ndarray:
+    """Convert input to np.datetime64 array."""
+    if isinstance(obj, (datetime, date)):
+        return np.array([np.datetime64(obj)])
+    elif isinstance(obj, np.datetime64):
+        return np.array([obj])
+    elif isinstance(obj, (list, tuple, np.ndarray)):
+        return np.asarray(obj, dtype='datetime64[ns]')
+    else:
+       raise TypeError(f"Unsupported type: {type(obj)}")
+
+def date_to_gps_week(input_dates: datetime_object) -> int | npt.NDArray[np.int_]:
+    dt_array = _to_np_datetime64(input_dates)
+    delta_days = (dt_array - GPS_EPOCH).astype('timedelta64[D]').astype(int)
+    result = delta_days // 7
+    return result[0] if result.size == 1 else result
+
+def gps_week_to_date(input_weeks: int | npt.NDArray[np.int_]) -> np.datetime64 | npt.NDArray[np.datetime64]:
+    weeks = np.asarray(input_weeks, dtype=int)
+    result = GPS_EPOCH + weeks.astype('timedelta64[W]')
+    return result[0] if result.size == 1 else result
+
+def leap_seconds(acquisition_dates: datetime_object) -> int | npt.NDArray[np.int_]:
+    dt_array = _to_np_datetime64(acquisition_dates)
+    result = np.array([(LEAP_SECONDS <= d).sum() for d in dt_array]).astype("timedelta64[s]")
+    return result[0] if result.size == 1 else result
+
+def epoch_to_duration(start_year: float, end_year: float) -> timedelta:
+    """
+    Convert the difference between two decimal years into a timedelta object,
+    accounting for leap years.
+
+    Parameters:
+        start_year (float): Starting epoch in decimal years.
+        end_year (float): Ending epoch in decimal years.
+
     Returns:
-    - latitude
-    - longitude
-    - ellipsoidal height
-    - antenna height"""
+        timedelta: Duration between the two epochs.
+    """
+    # Ensure start_year <= end_year
+    if end_year < start_year:
+        start_year, end_year = end_year, start_year
 
-    # Check if data or data file was passed
-    data_file = None
-    if isinstance(data, dict):
-        type = "JSON"
-    elif isinstance(data, pd.DataFrame):
-        if line == 0:
-            type = "LLH"
-        else:
-            type = "CSV"
+    print(f"Start: {start_year}\nEnd: {end_year}")
+
+    # Split into integer and fractional parts
+    start_int = int(start_year)
+    end_int = int(end_year)
+
+    # Helper to check leap year
+    def is_leap(year: int) -> bool:
+        return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+    total_days = 0.0
+
+    # First partial year
+    if start_int == end_int:
+        # Both in same year
+        days_in_year = 366 if is_leap(start_int) else 365
+        total_days = (end_year - start_year) * days_in_year
     else:
-        data_file = Path(data)
-        if not data_file.is_file():
-            raise FileNotFoundError(f"File {data_file} cannot be found.")
-        # Automatically interpret type unless specified
-        if type is None:
-            if data_file.suffix in (".CSV", ".csv"):
-                type = "CSV"
-            elif data_file.suffix in (".JSON", ".json"):
-                type = "JSON"
-            elif data_file.suffix in (".LLH", ".llh"):
-                type = "LLH"
-            elif data_file.name == "mocoref.moco":
-                type = "mocoref"
-            else:
-                raise RuntimeError("Failed to interpret file type.")
-    
-    if output_dir:
-        output_dir = Path(output_dir)
-    elif data_file:
-        output_dir = data_file.parent
-    else:
-        output_dir = Path.cwd()
-    
-    type = type.casefold()
-    # Validate type
-    valid_types = ["csv", "json", "llh", "mocoref"]
-    if type not in valid_types:
-        raise TypeError(f"Invalid type {type}. Valid types: {valid_types}")
-    
-    # Get mocoref data 
-    settings = Settings()
-    match type:
-        case "csv":
-            # Read data from file
-            if data_file:
-                data = pd.read_csv(data_file)
+        # Add remaining fraction of start year
+        days_in_start_year = 366 if is_leap(start_int) else 365
+        total_days += (1 - (start_year - start_int)) * days_in_start_year
 
-            # Validate the presence of mocoref data
-            if settings.MOCOREF_LATITUDE not in data.columns:
-                raise KeyError(f"{settings.MOCOREF_LATITUDE} key not found in {data_file}")
-            if settings.MOCOREF_LONGITUDE not in data.columns:
-                raise KeyError(f"{settings.MOCOREF_LONGITUDE} key not found in {data_file}")
-            if settings.MOCOREF_HEIGHT not in data.columns:
-                raise KeyError(f"{settings.MOCOREF_HEIGHT} key not found in {data_file}")
-            if settings.MOCOREF_ANTENNA not in data.columns:
-                raise KeyError(f"{settings.MOCOREF_ANTENNA} key not found in {data_file}")
-            
-            # Validate line parameter
-            if not isinstance(line, int) or not line > 0:
-                raise TypeError(f"The line parameter must specify a valid positive integer line for this data. Current: {line}")
-            if line > len(data):
-                raise IndexError(f"The line {line} does not exist in data.")
-            
-            mocoref_latitude = data[settings.MOCOREF_LATITUDE].iloc[line - 1]
-            mocoref_longitude = data[settings.MOCOREF_LONGITUDE].iloc[line - 1]
-            mocoref_height = data[settings.MOCOREF_HEIGHT].iloc[line - 1]
-            mocoref_antenna = data[settings.MOCOREF_ANTENNA].iloc[line - 1]
+        # Add full years in between
+        for year in range(start_int + 1, end_int):
+            total_days += 366 if is_leap(year) else 365
 
-            # Modify antenna offset to account for difference between RS3 and CHCI83 PCO:
-            mocoref_antenna = mocoref_antenna + pco_offset
+        # Add fraction of end year
+        days_in_end_year = 366 if is_leap(end_int) else 365
+        total_days += (end_year - end_int) * days_in_end_year
 
-        case "json":
-            # Read data from file
-            if data_file:
-                data = json.load(data_file)
+    return timedelta(days=total_days)
 
-            # Validate the presence of mocoref data
-            if settings.MOCOREF_LATITUDE not in data:
-                raise KeyError(f"{settings.MOCOREF_LATITUDE} key not found in {data_file}")
-            if settings.MOCOREF_LONGITUDE not in data:
-                raise KeyError(f"{settings.MOCOREF_LONGITUDE} key not found in {data_file}")
-            if settings.MOCOREF_HEIGHT not in data:
-                raise KeyError(f"{settings.MOCOREF_HEIGHT} key not found in {data_file}")
-            if settings.MOCOREF_ANTENNA not in data:
-                raise KeyError(f"{settings.MOCOREF_ANTENNA} key not found in {data_file}")
-            
-            mocoref_latitude = data[settings.MOCOREF_LATITUDE]
-            mocoref_longitude = data[settings.MOCOREF_LONGITUDE]
-            mocoref_height = data[settings.MOCOREF_HEIGHT]
-            mocoref_antenna = data[settings.MOCOREF_ANTENNA]
-        case "llh":
-            # Read data from file
-            if data_file:
-                data = pd.read_csv(data_file, sep=r'\s+',  names=['date','time', settings.MOCOREF_LATITUDE, settings.MOCOREF_LONGITUDE,
-                                                     settings.MOCOREF_HEIGHT, 'quality', 'satellites', 'sdn', 'sde', 'sdu',
-                                                     'sdne', 'sdeu', 'sdun', 'age', 'ar_ratio'])
-
-            # Validate the presence of mocoref data
-            if settings.MOCOREF_LATITUDE not in data:
-                raise KeyError(f"{settings.MOCOREF_LATITUDE} key not found in {data_file}")
-            if settings.MOCOREF_LONGITUDE not in data:
-                raise KeyError(f"{settings.MOCOREF_LONGITUDE} key not found in {data_file}")
-            if settings.MOCOREF_HEIGHT not in data:
-                raise KeyError(f"{settings.MOCOREF_HEIGHT} key not found in {data_file}")
-            
-            # Extract matching timestamps if a RINEX file is provided:
-            if tstart or tend:
-                data['timestamp'] = pd.to_datetime(data['date'] + ' ' + data['time'], format='%Y/%m/%d %H:%M:%S.%f', utc=True)
-                if tstart:
-                    data = data[data['timestamp'] >= tstart]
-                if tend:
-                    data = data[data['timestamp'] <= tend]
-            # LLH logs record phase center position
-            mocoref_antenna = 0
-            
-            # If quality is specified limit to Q=1 if present and find most dense cluster of continuous segments
-            if 'quality' in data and np.where(data['quality'] == 1):
-                data = data.iloc[np.where(data['quality'] == 1)]
-                
-                # Weight and mean for each continuous segment in ECEF
-                idiff = np.diff(data.index)
-                split_points = np.where(idiff > 1)[0]
-                start = 0
-                weights = []
-                points = []
-                for point in split_points:
-                    end = point + 1
-                    segment = data.iloc[start:end]
-                    weights.append(len(segment))
-                    points.append(geo_to_ecef.transform(
-                        segment[settings.MOCOREF_LONGITUDE].mean(),
-                        segment[settings.MOCOREF_LATITUDE].mean(),
-                        segment[settings.MOCOREF_HEIGHT].mean()
-                    ))
-                    start = end
-                segment = data.iloc[start:]
-                weights.append(len(segment))
-                points.append(geo_to_ecef.transform(
-                    segment[settings.MOCOREF_LONGITUDE].mean(),
-                    segment[settings.MOCOREF_LATITUDE].mean(),
-                    segment[settings.MOCOREF_HEIGHT].mean()
-                ))
-
-                # Convert to numpy arrays
-                weights = np.array(weights)
-                points = np.array(points)
-
-                # Use DBSCAN clustering to find dense regions within the threshold
-                db = DBSCAN(eps=tolerance, min_samples=1, metric='euclidean')
-                labels = db.fit_predict(points)
-
-                # Find the cluster with maximum total weight
-                best_cluster_label = None
-                max_weight = 0
-                for label in set(labels):
-                    cluster_mask = labels == label
-                    cluster_weight = weights[cluster_mask].sum()
-                    if cluster_weight > max_weight:
-                        max_weight = cluster_weight
-                        best_cluster_label = label
-
-                # Extract best cluster
-                best_mask = labels == best_cluster_label
-                points = points[best_mask]
-                weights = weights[best_mask]
-
-                # Perform weighted mean
-                pos = np.sum(weights[:, np.newaxis] * points, axis=0) / np.sum(weights)
-                mocoref_longitude, mocoref_latitude, mocoref_height = ecef_to_geo.transform(*pos)
-            else:
-                mocoref_latitude = data[settings.MOCOREF_LATITUDE].mean()
-                mocoref_longitude = data[settings.MOCOREF_LONGITUDE].mean()
-                mocoref_height = data[settings.MOCOREF_HEIGHT].mean()
-        case "mocoref":
-            generate = False
-            if not data_file:
-                raise RuntimeError("No mocoref file was specified")
-            mocoref_path = data_file
-            with open(data_file, 'r') as file:
-                lines = file.readlines()
-            value = re.compile(r"\d+(?:[\.\,]\d*)?")
-            mocoref_antenna = float(value.search(lines[3]).group())
-            mocoref_latitude = float(value.search(lines[4]).group())
-            mocoref_longitude = float(value.search(lines[5]).group())
-            mocoref_height = float(value.search(lines[6]).group())
-
-    if generate or verbose:
-        lines = []
-        lines.append("Moco reference {CH}\n")
-        lines.append("===================\n")
-        lines.append("\n")
-        lines.append(f"Antenna height [m] {{d}}: {mocoref_antenna}\n")
-        lines.append(f"Latitude [deg]     {{d}}: {mocoref_latitude}\n")
-        lines.append(f"Longitude [deg]    {{d}}: {mocoref_longitude}\n")
-        lines.append(f"Ground [m]         {{d}}: {mocoref_height}\n")
-    if generate:
-        mocoref_path = output_dir / "mocoref.moco"
-        with open(mocoref_path, 'w') as file:
-            file.writelines(lines)
-    else:
-        mocoref_path = None
-    if verbose or settings.VERBOSE:
-        print(''.join(lines))
-
-    return (mocoref_latitude, mocoref_longitude, mocoref_height + mocoref_antenna), mocoref_path
