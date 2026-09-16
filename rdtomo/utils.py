@@ -125,6 +125,8 @@ class Angles:
         if self._degs is not None:
             self._degs = np.hstack((self._degs, other.degs))
 
+    def __str__(self) -> str:
+        return f"degrees({self.degs})"
 # Warning message
 def warn(message) -> None:
     # Get the current stack
@@ -305,8 +307,8 @@ def srf_reader(path: str|Path) -> tuple[np.ndarray, None|str]:
     pixel_bits = header[3]
     byte_length = header[4]
     data_type = header[5]
-    ref_frame = header[6]           # Traditionally cmap
-    # cmap_length = header[7]
+    depth = header[6]               # Traditionally cmap
+    ref_frame = header[7]           # Traditionally cmap_length
 
     rf_map = {
         0: None,
@@ -323,7 +325,7 @@ def srf_reader(path: str|Path) -> tuple[np.ndarray, None|str]:
 
     # Check magic number
     if magic_number != 1504078485: # 0x59a66a95
-        raise RuntimeError(f"You attempted to read file {path} as an SRF file, but it returned the wrong magic number: {hex(magic_number)} (expected '0x59a66a95')")
+        raise RuntimeError(f"You attempted to read file {path} as an SRF file, but it returned the wrong magic number: {hex(magic_number)} (expected 0x59a66a95)")
     
     # Extract data type
     match data_type:
@@ -356,9 +358,8 @@ def srf_reader(path: str|Path) -> tuple[np.ndarray, None|str]:
         raise RuntimeError(f"SRF file {path} length did not match format.")
 
     # Channel count
-    depth = pixel_bits // bits_per_pix
-    if (depth * bits_per_pix) != pixel_bits:
-        raise RuntimeError(f"SRF file {path} pixel bits did not match raster type: {dtype}")
+    if (pixel_bits != bits_per_pix):
+        raise RuntimeError(f"Data type {data_type} ({dtype}) did not match pixel bits {pixel_bits}")
     
     # Read array
     return np.memmap(path, dtype=dtype, mode="r", offset=32, shape=(height, width, depth)).squeeze(), rf_map[ref_frame]
@@ -401,11 +402,10 @@ def srf_writer(path: str | Path, arr: np.ndarray, ref_frame: str) -> None:
     }
 
     try:
-        data_type, bits_per_sample = dtype_map[arr.dtype]
+        data_type, pixel_bits = dtype_map[arr.dtype]
     except KeyError:
         raise ValueError(f"Unsupported dtype: {arr.dtype}")
 
-    pixel_bits = depth * bits_per_sample
     byte_length = arr.nbytes
 
     rf_map = {
@@ -429,8 +429,8 @@ def srf_writer(path: str | Path, arr: np.ndarray, ref_frame: str) -> None:
             pixel_bits,
             byte_length,
             data_type,
-            rf, 
-            0,  # cmap_length
+            depth, 
+            rf,  # cmap_length
         ],
         dtype=np.int32,
     )
@@ -1232,8 +1232,8 @@ def linear_model_str(model: LinearRegression, var: str = 't', rounded: bool = Tr
     if model.coef_[0] == 0 and model.intercept_ == 0:
         return "0"
     if rounded:
-        return f"{f'{model.intercept_:.3g}' if model.intercept_ != 0 else ''}{
-            f' + {model.coef_[0]:.3g} * {var}' if model.coef_[0] > 0 else f' - {abs(model.coef_[0]):.3g} * {var}' if model.coef_[0] < 0 else ''
+        return f"{f'{model.intercept_:.2f}' if model.intercept_ != 0 else ''}{
+            f' + {model.coef_[0]:.3f} * {var}' if model.coef_[0] > 0 else f' - {abs(model.coef_[0]):.3f} * {var}' if model.coef_[0] < 0 else ''
         }"
     else:
         return f"{f'{model.intercept_}' if model.intercept_ != 0 else ''}{
@@ -1359,7 +1359,7 @@ def gpst_to_dt(gpst: float|npt.NDArray[np.floating], reference_date: datetime|np
         expected_abs = (reference_date - GPS_EPOCH).astype(timedelta).total_seconds()
         diff = abs(expected_abs - gps_median)
         if abs(diff - 1e9) < 5e7:  # tolerance ~50 million seconds (~1.5 years)
-            naive_time = GPS_EPOCH + gpst + np.timedelta64(10**6, type='timedelta64[s]')
+            naive_time = GPS_EPOCH + gpst + np.timedelta64(10**9, type='timedelta64[s]')
             fmt = "offset(+1e9)"
         else:
             raise ValueError(f"Unknown GPS time format: median={gps_median}, diff={diff}")
@@ -1383,7 +1383,7 @@ def gps_week_start(dt: datetime) -> datetime:
     start_date = (dt_utc - timedelta(days=days_since_sunday)).date()
     utc_start = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
 
-    return utc_start + leap_seconds(utc_start)
+    return utc_start - leap_seconds(utc_start)
 
 def decimal_year_to_datetime(year: float) -> datetime:
     y = datetime(year=int(year), month=1, day=1)

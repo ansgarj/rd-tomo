@@ -2,7 +2,9 @@ import click
 from pathlib import Path
 import os
 import time as Time
-from datetime import datetime, date
+from datetime import datetime
+import json
+from matplotlib import pyplot as plt
 
 from ..gnss import fetch_swepos as run_fetch_swepos, station_ppp as run_station_ppp, reachz2rnx, generate_mocoref
 from ..trackfinding import trackfinder as run_trackfinder
@@ -30,16 +32,16 @@ from ..data import LoadDir, DataDir, ProcessingDir
 @click.option("--downloads", type=int, default=10, help="Max number of parallel downloads (default: 10)")
 @click.option("--attempts", type=int, default=3, help="Max number of attempts for each file (default: 3)")
 @click.option("-m", "--mask", "elevation_mask", type=float, default=None, help="Elevation mask for satellites")
-@click.option("-l", "--line", "csv_line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
+@click.option("--line", "csv_line", type=int, default=1, help="Line in CSV file to read data from (default=1)")
 @click.option("--offset", type=float, default=-0.079, help="Specify vertical PCO between mocoref data log receiver and drone processing receiver (default=-0.079) for CSV files")
 @click.option("--overlap", "minimal_overlap", type=float, default=10, help="Specify minimal overlap between base OBS and drone flight in minutes (default: 10 minutes)")
 @click.option("-k", "--config", type=click.Path(exists=True, path_type=Path), default=None, help="Specify external config file for rnx2rtkp")
 @click.option("-f", "--force", is_flag=True, help="Force generation of processing directory (this may overwrite existing directories, but has no effect if PATH is a processing directory)")
-@click.option("--dry", is_flag=True, help="Force the specified PATH to be interpreted as a processing directory")
-@click.option("-t", "--tag", default = "", help="Tag processing directory with specified string")
+@click.option("--dry", is_flag=True, help="Dry run a data folder without generating the processing directory")
+@click.option("-t", "--tag", type=str, default = "", help="Tag processing directory with specified string")
+@click.option("-l", "--linear", type=int, default=0, help="Process linear track specified by an integer > 0")
 def init(
     path: LoadDir|None,
-    force: bool,
     use_swepos: bool,
     use_ppp: bool,
     is_zip: bool,
@@ -55,6 +57,7 @@ def init(
     use_broadcast: bool,
     tag: str,
     config: Path | None,
+    force: bool,
     atx: Path | None,
     receiver: Path | None,
     downloads: int,
@@ -63,6 +66,7 @@ def init(
     csv_line: int,
     offset: float,
     minimal_overlap: float,
+    linear: int,
 ) -> None:
     """Searches recursively from the PATH (default: CWD) to find matching files:
     (1) Drone GNSS .bin and .log;
@@ -106,6 +110,9 @@ def init(
         if tag:
             processing_dir += "_" + tag
 
+        if not force and not dry and processing_dir.exists():
+            raise FileExistsError(f"The target processing directory ({processing_dir}) already exists. Use --force to force overwrite or --tag to add a tag.")
+
         path = path.init(
                 processing_dir=processing_dir,
                 atx = atx,
@@ -130,6 +137,7 @@ def init(
                 dry=dry,
                 ppk_config=config,
             )
+
     # Verify that loading as Processing Directory was sucessful (failes on dry)
     if not isinstance(path, ProcessingDir):
         return
@@ -142,9 +150,42 @@ def init(
             download_attempts=attempts,
             max_downloads=downloads,
             elevation_mask=elevation_mask,
-            minimal_overlap=minimal_overlap
+            minimal_overlap=minimal_overlap,
+            linear=linear
         )
     
+@click.command()
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=ProcessingDir), default=None)
+@click.option("-t", "--track", type=int, default=1, help="Select spiral to inspect (default: 1)")
+@click.option("-d", "--demref", type=click.Path(exists=True, path_type=Path), default=None, help="Specify path to DEM directly (default: taken from Settings)")
+@click.option("-n", "--noshow", is_flag=True, help="Do not show plots (they are still saved to a file)")
+def inspect(path: ProcessingDir|None, track: int, demref: Path|None, noshow: bool) -> None:
+    """Inspects and saves plots of SAR parameters and associated meta data. Requires a valid DEM. This tool
+    can be used to complete inspection if it failed during init due to missing DEM."""
+    if not path:
+        path = ProcessingDir.cwd()
+    print(f"Inspecting track {track:02} ...", end=" ", flush=True)
+    fig, data = path.inspect(track=track, dem_path=demref)
+    print("done.")
+
+    fig.savefig(path.track_dir(track) / "sar_parameters.svg")
+    print(f"--> Plot saved to > {path.track_dir(track) / "sar_parameters.svg"}")
+    with open(path.track_dir(track) / "meta_data.json", "w") as f:
+        json.dump(data, f, indent=4)
+    print(f"--> Meta data saved to > {path.track_dir(track) / "metadata.json"}")
+
+    if not noshow:
+        plt.show()
+
+@click.command()
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=LoadDir), default=None)
+def info(path: None|LoadDir):
+    if path is None:
+        path = LoadDir.cwd()
+
+    print(f"{path.name}: {path} ...")
+    print(json.dumps(path.info, indent=4))
+
 
 @click.command()
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=Path))

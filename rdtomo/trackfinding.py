@@ -1,26 +1,22 @@
 from __future__ import annotations
 import os
-import pandas as pd
 import numpy as np
 import numpy.typing as npt
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from multiprocessing import Pool, Manager
+from multiprocessing import Pool
 from datetime import datetime, timedelta
 from scipy.optimize import minimize
 from pathlib import Path
-from collections import defaultdict, Counter
-import json
 from matplotlib.figure import Figure
-from typing import Type, TypeVar, overload, Iterable
+from typing import Type, TypeVar, overload, Iterable, Iterator
 from abc import ABC, abstractmethod
 import re
 
 from .utils import Angles, IndexType, find_inliers, format_duration, add_meta, parse_datetime_string, gpst_to_dt, gpst, srf_reader, ascii_reader, slice_mask, infer_rf
 from .position import Pos, DeltaPos, ReferenceFrame
 from .dem import elevation as get_elevation
-from .apperture import SARModel
 from .config import Frequencies, Settings
 FREQUENCIES = Frequencies()
 
@@ -165,7 +161,10 @@ class RawFlight:
     
     def timestamps(self) -> tuple[str, str]:
         return format_duration(gpst(self.pos.dt[0].astype(datetime))), format_duration(gpst(self.pos.dt[-1].astype(datetime)))
-    
+
+    def copy(self) -> RawFlight:
+        return type(self)(self.pos.copy(), self.vel.copy(), self.yaw.copy(), self.roll.copy(), self.pitch.copy())
+     
     def save(self, path: str|Path) -> None:
         data = {
             "coords": np.hstack((self.pos.geo, self.pos._time.reshape(-1,1)/np.timedelta64(1, 's'))),
@@ -181,8 +180,8 @@ class RawFlight:
     @classmethod
     def load(cls: Type[FlightType], path: str|Path) -> FlightType:
         """Loads a FlightType object from a saved .npz file."""
-        with np.load(path, allow_pickle=False) as data:
-            pos = Pos(data['coords'], epoch=data['epoch'], frame=data['frame'], geodetic=True)
+        with np.load(path, allow_pickle=True) as data:
+            pos = Pos(data['coords'], epoch=data['epoch'].item(), frame=str(data['frame']), geodetic=True)
             vel = DeltaPos(data['vel'])
             yaw = Angles(data['yaw'], degrees=True)
             roll = Angles(data['roll'], degrees=True)
@@ -191,7 +190,7 @@ class RawFlight:
         return cls(pos, vel, yaw, roll, pitch)
     
     def dur(self) -> np.timedelta64:
-        return self.pos.dt[-1] - self.pos.dt[0]
+        return (self.pos.dt[-1] - self.pos.dt[0]).astype('timedelta64[s]')
     
     def __str__(self) -> str:
         return f"RawFlight({len(self.pos)} data points)"
@@ -437,10 +436,9 @@ class Track(RawFlight, ABC):
         return f"Track({len(self.pos)} data points)"
     
 class Spiral(Track):
-    __slots__ = ("_center", "_dif", "_model", "_initialized")
+    __slots__ = ("_center", "_dif", "_dem_path", "_model", "_initialized")
     _center: Pos
     _dif: DeltaPos
-    _model: SARModel
     _initialized: bool
 
     def __new__(cls, *args, **kwargs) -> Spiral:
@@ -466,6 +464,7 @@ class Spiral(Track):
         super().__init__(arg1, vel, yaw, roll, pitch)
         self._center = None
         self._dif = None
+        self._dem_path = None
         self._model = None
 
     @property
@@ -488,13 +487,13 @@ class Spiral(Track):
             self._center = centroid + result.x
         return self._center.copy()
     
-    def elevation(self, elevation: float|None = None) -> float:
+    def elevation(self, elevation: float|None = None, dem_path: None|Path|str = None) -> float:
         """Corrects the elevation value of the center point. If elevation is
         specified, this is the value set, otherwise the value is obtained from
         a DEM."""
         if elevation is None:
-            elevation = get_elevation(center.lat, center.lon)
-        self._center = self.center.make([self.center.lat[0], self.center.lon[0], elevation], geodetic=True)
+            elevation, self._dem_path = get_elevation(self.center, dem_path=dem_path)
+        self._center = self.center.make([self.center.lon[0], self.center.lat[0], elevation], geodetic=True)
 
     @property
     def radius(self) -> npt.NDArray[np.float64]:
@@ -514,6 +513,10 @@ class Spiral(Track):
             self._dif = self.pos - self.center
         return self._dif.up
 
+    @property
+    def dem_path(self) -> Path|None:
+        return self._dem_path
+
     def info(self, elevation: float|None = None) -> dict:
         """Returns a dict with basic information about the spiral:
         - t_start: timestamp for start of track
@@ -532,8 +535,8 @@ class Spiral(Track):
             self.elevation(elevation)
         ts = self.timestamps()
         info = {
-            "t_start": ts[0],
-            "t_end": ts[1],
+            "t_start": str(self.pos.dt[0]),
+            "t_end": str(self.pos.dt[-1]),
             "center_lat": self.center.lat[0],
             "center_lon": self.center.lon[0],
             "reference_elevation": self.center.h[0],
@@ -543,6 +546,13 @@ class Spiral(Track):
             "min_altitude": round(self.altitude.min()),
         }
         return info
+
+    def copy(self) -> Spiral:
+        new_spiral = type(self)(self.pos.copy(), self.vel.copy(), self.yaw.copy(), self.roll.copy(), self.pitch.copy())
+        new_spiral._center = self.center
+        new_spiral._dif = self._dif.copy()
+        new_spiral._dem_path = self._dem_path
+        return new_spiral
     
     def save(self, path: str|Path) -> None:
         data = {
@@ -554,21 +564,24 @@ class Spiral(Track):
             "roll": self.roll.degs,
             "pitch": self.roll.degs,
             "center": self.center.geo,
+            "dem": str(self._dem_path.resolve()) if self._dem_path else ""
         }
         np.savez(path, **data)
 
     @classmethod
     def load(cls: Type[Spiral], path: str|Path) -> Spiral:
         """Loads a Spiral object from a saved .npz file."""
-        with np.load(path, allow_pickle=False) as data:
-            pos = Pos(data['coords'], epoch=data['epoch'], frame=data['frame'], geodetic=True)
+        with np.load(path, allow_pickle=True) as data:
+            pos = Pos(data['coords'], epoch=data['epoch'].item(), frame=str(data['frame']), geodetic=True)
             vel = DeltaPos(data['vel'])
             yaw = Angles(data['yaw'], degrees=True)
             roll = Angles(data['roll'], degrees=True)
             pitch = Angles(data['pitch'], degrees=True)
             center = pos.make(data['center'], geodetic=True)
+            dem = Path(str(data['dem'])) if data['dem'] else None
         instance = cls(pos, vel, yaw, roll, pitch)
         instance._center = center
+        instance._dem_path = dem
 
         return instance
     
@@ -737,7 +750,10 @@ class Linear(Track):
 
     def __str__(self) -> str:
         return f"LinearTrack({len(self.pos)} data points)"
-    
+
+    def __iter__(self) -> Iterator[Linear]:
+        return iter(self.tracks)
+
 class Irregular(Track):
     __slots__ = ("_initialized",)
 
@@ -810,7 +826,7 @@ def find_flights(data: np.ndarray, reference_date: datetime, reference_frame: st
     # Remove spurious flights
     flights = [flight for flight in flights if flight.dur() > minimum_flight_dur]
 
-    return flights, ground_alt
+    return flights
 
 # Find tracks
 def find_tracks(flights: list[Flight], npar: int = os.cpu_count()) -> dict[str, int]:
@@ -928,7 +944,7 @@ def plot_tracks(
     return fig, axes
 
 # Modify the radar[...].inf file
-def modify_radar_inf(path: Path, info: dict, dt: datetime|None = None, dry: bool = False) -> Path:
+def modify_radar_inf(path: Path, tracks: list[Spiral]|Linear, dt: datetime|None = None, dry: bool = False) -> Path:
     """
     Modify radar_logger_dat-[...].inf file with new track timestamps.
     
@@ -938,11 +954,10 @@ def modify_radar_inf(path: Path, info: dict, dt: datetime|None = None, dry: bool
     """
     t_start = []
     t_end = []
-    for ts in info.values():
-        if not isinstance(ts, dict):
-            continue
-        t_start.append(ts['t_start'])
-        t_end.append(ts['t_end'])
+    for t in tracks:
+        ts = t.timestamps()
+        t_start.append(ts[0])
+        t_end.append(ts[1])
     folder = path.parent.parent / "radar1"
     if not dt:
         match = re.search(r'(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})', path.name)
@@ -994,9 +1009,9 @@ def modify_radar_inf(path: Path, info: dict, dt: datetime|None = None, dry: bool
         f.write(radar_inf[3] + "\n")
         f.write("\n")
         f.write(" ".join(radar_inf[4:8]) + "                    " + " ".join(radar_inf[8:10]) + "\n")
-        f.write(" ".join(radar_inf[10:16]) + "      " + radar_inf[16])
+        f.write(" ".join(radar_inf[10:16]) + "      " + radar_inf[16] + " ")
         f.write(" ".join(t_start) + "\n")
-        f.write(" ".join(radar_inf[17:19]) + "   " + " ".join(radar_inf[19:23]) + "      " + radar_inf[23])
+        f.write(" ".join(radar_inf[17:19]) + "   " + " ".join(radar_inf[19:23]) + "      " + radar_inf[23] + " ")
         f.write(" ".join(t_end) + "\n")
         f.write(" ".join(radar_inf[24:-2]) + "             " + " ".join(radar_inf[-2:]))
 
@@ -1007,10 +1022,9 @@ def modify_radar_inf(path: Path, info: dict, dt: datetime|None = None, dry: bool
 def trackfinder(
         path: str|Path,
         linear: int = 0,
-        verbose: bool = False,
         dry: bool = False,
         npar: int = os.cpu_count()
-) -> list[Spiral]:
+) -> list[Spiral]|Linear:
     """Reads a moco file and segments it to find flights and identify their tracks, classified as 
     - Spiral: the track consists of the spiral part of the flight,
     - Linear: the track consists of the parallel linear segments,
@@ -1046,7 +1060,7 @@ def trackfinder(
     print(f"--> Working in reference frame: {rf}")
 
     # 2. Find flights
-    flights, base_ele = find_flights(data, dt, rf)
+    flights = find_flights(data, dt, rf)
     print(f"--> {len(flights)} flights found ...", end=" ", flush=True)
 
     # 3. Find tracks
@@ -1057,97 +1071,35 @@ def trackfinder(
     else:
         print(".")
 
-    # 4. Perform rudimentary analysis of tracks
-    print("--> Analyzing tracks ...", end=" ", flush=True)
-    flight_info = analyze_tracks(flights, base_ele=base_ele)
-    print("done.")
-
-    meta_str = "Altitude is counted relative the base position (take off)."
-    flight_info = add_meta(flight_info, meta_str)
-
-    if verbose or Settings().VERBOSE:
-        print(json.dumps(flight_info, indent=4))
-
-    ## 5. Plot tracks
-    fig, axes = plot_tracks(flights, suptitle=f"{dt.strftime("%Y-%m-%d")}: tracks")
+    # 4. Plot tracks
+    fig, _ = plot_tracks(flights, suptitle=f"{dt.strftime("%Y-%m-%d")}: tracks")
     if dry:
         plt.show()
    
-    # 6. File generation
+    # 5. File generation
     else:
         # Save plot of tracks
         fig_path = path.with_name(dt.strftime("%Y-%m-%d-%H-%M-%S-trackfinder.svg"))
         fig.savefig(fig_path)
         print(f"--> Plot of tracks saved to {fig_path}", flush=True)
         
-        # Modify radar_inf file
+        # Extract relevant tracks
         if linear == 0:
-            inf_path = modify_radar_inf(path, flight_info['Spirals'], dt=dt, dry=dry)
-        elif linear:
-            inf_path = modify_radar_inf(path, flight_info[f'Linear_{linear}'], dt=dt, dry=dry)
-        print(f"--> Timestamps saved to {inf_path}", flush=True)
-        
-        # Save flight_info
-        result = f"{len(flights)} flights found: {counters['spiral']} spiral, {counters['linear']} linear"
-        if counters['irregular'] > 0:
-            result += f", {counters['irregular']} irregular."
+            tracks = [f.track for f in flights if isinstance(f.track, Spiral)]
         else:
-            result += "."
-        flight_info = add_meta(flight_info, result, '__flights__')
-        fi_path = path.with_name(dt.strftime("%Y-%m-%d-%H-%M-%S-flight_info.json"))
-        with open(fi_path, 'w') as f:
-            json.dump(flight_info, f, indent=4)
-        print(f"--> Information about tracks saved to {fi_path}", flush=True)
+            tracks = [f.track for f in flights if isinstance(f.track, Linear)][linear-1]
+            
+
+        # Modify radar_inf file
+        inf_path = modify_radar_inf(path, tracks, dt=dt, dry=dry)
+        print(f"--> Timestamps saved to {inf_path}", flush=True)
 
         # Save tracks:
         print(f"--> Saving tracks ...", flush=True)
-        n_spiral = 0
-        n_linear = 0
-        for flight in flights:
-            if flight.type == 'Spiral':
-                n_spiral += 1
-                file_name = path.with_name(dt.strftime(f"%Y-%m-%d-%H-%M-%S-{n_spiral:02}-spiral_track.npz"))
-            elif flight.type == 'Linear':
-                n_linear += 1
-                file_name = path.with_name(dt.strftime(f"%Y-%m-%d-%H-%M-%S-{n_linear:02}-linear_track.npz"))
+        for n, t in enumerate(tracks):
+            file_name = path.with_name(dt.strftime(f"%Y-%m-%d-%H-%M-%S-{n+1:02}-track.npz"))
             print(f"     > {file_name}")
-            flight.track.save(file_name)
+            t.save(file_name)
             
-    print("All done.")
-    if linear == 0:
-        return [flight.track for flight in flights if flight.type == 'Spiral']
-    else:
-        return flight[flight_info[f'linear_{linear}']['flight_num']].track
-
-## Model spiral tracks
-def model_spirals(tracks, path, dry, verbose, npar: int = os.cpu_count()):
-    with Pool(processes=npar) as pool:
-        results = pool.starmap(_model, [(i, track, dry) for i, track in tracks.items()])
-
-        for i, fig, evaluation in sorted(results, key=lambda x: x[0]):
-            if verbose:
-                print(f"Spiral {i}:", end=" ", flush=True)
-                print(json.dumps(evaluation, indent=4))
-            if not dry:
-                fig_path = path.with_name(path.stem + f"-{i:02}_spiral_model.pdf")
-                eval_path = fig_path.with_suffix(".json")
-                fig.savefig(fig_path, format="pdf")
-                with open(eval_path, 'w') as dst:
-                    json.dump(evaluation, dst, indent=4)
-                print(f"Model evaluation for Spiral {i} saved to {fig_path} and {eval_path}")
-
-def _model(i: int, track: pd.DataFrame, dry: bool = False) -> tuple[int, Figure, defaultdict[dict]]:
-    model = SARModel(track)
-    fig, evaluation = model.evaluate()
-    try:
-        fig.canvas.manager.set_window_title(f"SAR parameters: Spiral {i}")
-    except Exception:
-        pass
-    if dry:
-        if i == 1:
-            print("Showing model plots ...", end=" ", flush=True)
-        plt.show()
-        if i == 1:
-            print("done.")
-
-    return i, fig, evaluation
+    print("--> All done.")
+    return tracks

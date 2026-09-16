@@ -2,7 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.0] - Unreleased
+## [0.2.1] - Unreleased
+
+### Added
+- rd-tomo settings now contain a key `RADAR_BANDS` located under `RADAR` -> `BANDS` which contains an integer list which specifies which processing folders are to be populated (default: `[2, 3, 5, 6, 7, 8]`)
+- `rdtomo inspect` to inspect and save plots of the SAR parameters of spiral tracks, and associated metadata (requires valid DEM)
+- `rdtomo/resources/se_lantmateriet_SWEN17_RH2000.tif` for conversion between ellipsoidal and orthometric heights in SWEREF99
+- `rdtomo.ReferenceFrame.orthometric()` for converting ellipsoidal height to orthometric (only SWEREF99 implemented), and `rdtomo.Pos.orthometric` (and `rdtomo.Pos.orthometric_llh`) that uses it to return orthometric height values (in array with longitude and latitude).
+- `rdtomo.ReferenceFrame.ellipsoidal()` for converting orthometric height to ellipsoidal (only SWEREF99 implemented).
+- `rdtomo info` to print information about a directory
+- `rdtomo dem` group of tools for DEM handling (current contains only `rdtomo dem make-ellipsoidal` which converts a `SWEREF99` DEM to ellipsoidal heights from orthometric), and the associated `rdtomo.dem.make_ellipsoidal()`
+
+## Changed
+- `rdtomo.trackfinding.trackfinder()` no longer produces a `flight_info.json` file
+- `rdtomo init` now checks for a valid DEM for each spiral track and warns if none is found, then proceeds to do some basic modelling of the spiral and the SAR parameters if a DEM was found (this behaviour can run later with `rdtomo inspect` if need be)
+
+### Fixed
+- Fixed bug associated with `rdtomo.trackfinding.trackfinder()` caused by `rdtomo.Pos.make()` defaulting to `lat_first` when `geodetic=True`. 
+- Fixed bug associated with converting datetime to GPST where the leap seconds were subtracted rather than added. This caused the timestamps for the tracks to be incorrectly printed (being offset by minus twice the number of leap seconds).
+- Updated `rdtomo.apperture` to match the changes in the rest of `rdtomo`.
+- Corrected EPSG codes (LLH, geodetic, ECEF) for the various national reference frames
+
+## [0.2.0]
 
 ### Added
 - `rdtomo.position` classes `Pos`, `DeltaPos`, `ReferenceFrame` that functions as a simplified interface to manage coordinates and Reference Frames (similar to `datetime` classes `datetime`, `timedelta` and `timezone`, but explicitly handling arrays of coordinates).

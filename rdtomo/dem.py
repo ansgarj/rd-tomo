@@ -6,14 +6,15 @@ import rasterio
 from pyproj import Transformer
 import xml.etree.ElementTree as ET
 import os
+import numpy as np
 
 from .utils import leap_seconds, warn
 from .config import Settings, LOCAL
 from .manager import build_vrt
-from .position import Pos
+from .position import Pos, ReferenceFrame
 
 # Get elevation from DEMs for a point
-def elevation(point: Pos, dem_path: Path|str = None) -> float | None:
+def elevation(point: Pos, dem_path: Path|str = None) -> tuple[float|None, Path|None]:
     """Returns the elevation for a specific point from the highest resolved DEM at that point,
     or from the user specified DEM."""
     def  get_elevation(dem_path: Path) -> float|None:
@@ -27,18 +28,17 @@ def elevation(point: Pos, dem_path: Path|str = None) -> float | None:
                 return "Unknown"
         
         def _point_in_bounds(src: rasterio.DatasetReader) -> tuple[float, float]|None:
-            match src.crs:
-                case point.frame.proj_crs(lat=point.lat, lon=point.lon):
-                    x, y = point.easting[0], point.northing[0]
-                case point.frame.geo_crs:
-                    x, y = point.lon[0], point.lat[0]
-                case _:
-                    try:
-                        x, y = Transformer.from_crs(point.frame.geo_crs, src.crs, always_xy=True).transform(point.lon[0], point.lat[0])    
-                    except Exception:
-                        return None
+            if src.crs == point.frame.proj_crs(lat=point.lat, lon=point.lon):
+                x, y = point.easting[0], point.northing[0]
+            elif src.crs == point.frame.geo_crs:
+                x, y = point.lon[0], point.lat[0]
+            else:
+                try:
+                    x, y = Transformer.from_crs(point.frame.geo_crs, src.crs, always_xy=True).transform(point.lon[0], point.lat[0])    
+                except Exception:
+                    return None
             if src.bounds.left <= x <= src.bounds.right and src.bounds.bottom <= y <= src.bounds.top:
-                return (x,y)
+                return src.index(x,y)
             return None
 
         def _normalize_path(path: Path) -> Path:
@@ -83,44 +83,79 @@ def elevation(point: Pos, dem_path: Path|str = None) -> float | None:
 
             return None, None
 
-        # Begin get_dem function
+        # Begin get_elevation function
         file_type = _check_file_type(dem_path)
         if file_type == "TIFF":
             with rasterio.open(dem_path) as src:
                 coords = _point_in_bounds(src)
                 if coords:
                     dem = src.read(1)
-                    return dem[coords]
+                    return dem[coords], dem_path
                 else:
-                    return None
+                    return None, dem_path
         
         elif file_type == "VRT":
             raster_path, coords = _find_raster_in_vrt(dem_path)
             if raster_path:
                 with rasterio.open(raster_path) as src:
                     dem = src.read(1)
-                    return dem[coords]
+                    return dem[coords], raster_path
             else:
-                return None
+                return None, raster_path
         
         else:
-            return None
+            return None, dem_path
     
     # Begin main function
-    dem_path = Path(dem_path)
-    if dem_path.is_file():
-        result = get_elevation(dem_path)
+    if dem_path is not None:
+        dem_path = Path(dem_path)
+        if dem_path.is_file():
+            result = get_elevation(dem_path)
     else:
         settings = Settings()
         vrt_path = LOCAL / f"{settings.TARGET_FRAME}_DEM.vrt"
-        dem_path = build_vrt(vrt_path, settings.DEMS)
+        build_vrt(vrt_path, settings.DEMS[settings.TARGET_FRAME])
         
-        result = get_elevation(dem_path)    
+        result, dem_path = get_elevation(vrt_path)
+        
     if not result:
         warn(f"No DEM found for coordinates {point}")
 
-    return result
+    return result, dem_path
 
+def make_ellipsoidal(path: str|Path, out: str|Path, rf: None|str|ReferenceFrame = None):
+    """"""
+    # Normalize rf
+    if rf is None:
+        rf = Settings().TARGET_FRAME
+    rf = ReferenceFrame(rf)
+
+
+    with rasterio.open(path, 'r') as src:
+        dem = src.read(1)
+        if src.crs == rf.geo_crs or src.crs == rf.llh_crs:
+            proj = False
+        elif isinstance(rf.proj_epsg(), int) and src.crs == rf.proj_crs():
+            proj = True
+        elif isinstance(rf.proj_epsg(), tuple) and src.crs in rf.proj_crs():
+            proj = True
+        else:
+            raise RuntimeError(f"Source CRS ({path}) does not match ant {rf} CRS")
+        rows, cols = np.indices(dem.shape)
+        xs, ys = src.transform * (0.5 + cols, 0.5 + rows)
+        mask = dem != src.nodata
+        x = xs[mask]
+        y = ys[mask]
+        h = dem[mask]
+        if proj:
+            # Convert x,y to geodetic
+            x, y = Transformer.from_crs(src.crs, rf.geo_crs, always_xy=True).transform(x, y)
+        h = rf.ellipsoidal(x, y, h)
+        ellipsoidal_dem = np.asarray(h).reshape(dem.shape)[np.newaxis, ...]
+        with rasterio.open(out, 'w', **src.profile) as dst:
+            dst.write(ellipsoidal_dem)
+
+        
  
 def las_acquisition_time(las_path: str, reference_date: datetime) -> datetime:
     """

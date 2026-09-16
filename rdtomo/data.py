@@ -1,5 +1,6 @@
 from __future__ import annotations
 import re
+import os
 from datetime import datetime, timedelta, date as datetype
 from pathlib import Path
 from contextlib import contextmanager, ExitStack
@@ -8,19 +9,27 @@ from dataclasses import dataclass
 from typing import KeysView, ValuesView, ItemsView, Any, Iterator
 import shutil
 from matplotlib import pyplot as plt
+from matplotlib.figure import Figure
 from os import cpu_count
 from abc import ABC
 import subprocess
 from time import sleep
+from multiprocessing import Pool
+import json
 
-from .utils import warn, extract_datetime, drop_into_terminal, local, srf_reader, srf_writer, gpst_to_dt, parse_datetime_string, ascii_reader, infer_rf
-from .manager import tmp, read_only, DirExistsError, DirNotFoundError, gdl, run
+from .utils import warn, extract_datetime, drop_into_terminal, local, srf_reader, srf_writer, gpst_to_dt, parse_datetime_string, ascii_reader
+from .manager import tmp, DirExistsError, DirNotFoundError, gdl, run
 from .gnss import reachz2rnx, fetch_swepos, extract_rnx_info, station_ppp, ppk, ubx2rnx, splice_sp3, splice_clk, splice_inx, chc2rnx, reach2rnx, generate_mocoref, read_rnx2rtkp_out
 from .core import TomoScene, TomoScenes, Scenes, tomoinfo
-from .apperture import SARModel
+from .apperture import SpiralModel
 from .position import Pos, ReferenceFrame
-from .trackfinding import trackfinder
+from .trackfinding import trackfinder, Spiral
 from .config import Settings
+
+# Helper function to populate processing subdirectories
+def _proc(band: int, cross_dir: Path):
+    gdl(f"proc,{band}", capture=True)
+    (cross_dir / f"processing_{band}.done").touch()
 
 # Abstract class that dispatches to DataDir, ProcessingDir, TomoDir or TomoArchive
 class LoadDir(Path, ABC):
@@ -605,7 +614,7 @@ class DroneData():
             if path is not None:
                 return True
         return False
-    
+
 class DataDir(LoadDir):
     def __new__(cls, *args, **kwargs) -> DataDir:
         return super().__new__(cls, *args, data=True, **kwargs)
@@ -713,7 +722,7 @@ class DataDir(LoadDir):
             "Reach ZIP archive": re.compile(r"^Reach_\d+\.(zip|ZIP)$"),
         }
 
-        nav_pattern = re.compile(r"^.+\.(\d{2}[Pp]|nav|NAV)")
+        nav_pattern = re.compile(r"^.+\.(\d{2}[Pp]|nav|NAV)$")
         
         # Patterns to look for Mocoref data files
         mocoref_patterns: dict[str, re.Pattern] = {
@@ -1085,9 +1094,13 @@ class DataDir(LoadDir):
         return [f for f in self.rglob('*') if f.is_file()]
     
     @property
-    def info(self) -> list[Path]:
-        return self.content
-        
+    def info(self) -> list[str]:
+        return [str(p) for p in self.content]
+
+    @property
+    def name(self) -> str:
+        return "Data Directory"
+
 class ProcessingDir(LoadDir):
     date: str
     rawdata: Path
@@ -1240,8 +1253,8 @@ class ProcessingDir(LoadDir):
         if self._moco_file is None:
             self.gather()
             (self.rawdata / "moco").mkdir(exist_ok=True)
-            object.__setattr__(self,"_moco", self.rawdata / "moco" / (self.data.drone_imu_bin.stem + "_ts+00_il_ie_ad.moco"))
-        return self._moco
+            object.__setattr__(self,"_moco_file", self.rawdata / "moco" / (self.data.drone_imu_bin.stem + "_ts+00_il_ie_ad.moco"))
+        return self._moco_file
             
     def init(
             self,
@@ -1252,85 +1265,168 @@ class ProcessingDir(LoadDir):
             download_attempts: int = 3,
             max_downloads: int = 10,
             elevation_mask: float|None = None,
-            minimal_overlap: timedelta|float = timedelta(minutes=10)
+            minimal_overlap: timedelta|float = timedelta(minutes=10),
+            linear: int = 0
         ) -> None:
 
         # Gather data and ensure parameter files are present
         self.gather()
 
-        # Run PPK
-        coords, results = self.data.ppk(
-            config=config,
-            use_precise=use_precise,
-            atx=atx,
-            receiver=receiver,
-            elevation_mask=elevation_mask,
-            max_downloads=max_downloads,
-            download_attempts=download_attempts,
-            minimal_overlap=minimal_overlap,
-        )
-        gpst, q = results["gpst"], results["quality"]
-        
-        # Plot flights
-        fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8))
-        axs = axs.flatten()
-        ax = axs[0]
-        ax.plot(gpst[q==1], coords.h[q==1], 'g')
-        ax.plot(gpst[q!=1], coords.h[q!=1], 'r+')
-        ax.set_xlabel("GPST (s)")
-        ax.set_ylabel("Ellipsoidal Height (m)")
-        ax.set_title(coords.frame.name)
-        ax = axs[1]
-        ax.plot(coords.easting[q==1], coords.northing[q==1], 'g')
-        ax.plot(coords.easting[q!=1], coords.northing[q!=1], 'r+')
-        ax.set_xlabel("Easting (m)")
-        ax.set_ylabel("Northing (m)")
-        fig_name = self.data.timestamp.strftime("%Y-%m-%d-%H-%M-%S-gnss-position.png")
-        fig.savefig(self.radar_dir / fig_name, format="png")
+        if self.moco_file.is_file():
+            print(f"Found file: {self.moco_file}")
+            print("--> Will not perform direct georeferencing of drone.")
+        else:
+            # Run PPK
+            coords, results = self.data.ppk(
+                config=config,
+                use_precise=use_precise,
+                atx=atx,
+                receiver=receiver,
+                elevation_mask=elevation_mask,
+                max_downloads=max_downloads,
+                download_attempts=download_attempts,
+                minimal_overlap=minimal_overlap,
+            )
+            gpst, q = results["gpst"], results["quality"]
+            
+            # Plot flights
+            fig, axs = plt.subplots(2, 1, squeeze=False, figsize=(8, 8))
+            axs = axs.flatten()
+            ax = axs[0]
+            ax.plot(gpst[q==1], coords.h[q==1], 'g')
+            ax.plot(gpst[q!=1], coords.h[q!=1], 'r+')
+            ax.set_xlabel("GPST (s)")
+            ax.set_ylabel("Ellipsoidal Height (m)")
+            ax.set_title(coords.frame.name)
+            ax = axs[1]
+            ax.plot(coords.easting[q==1], coords.northing[q==1], 'g')
+            ax.plot(coords.easting[q!=1], coords.northing[q!=1], 'r+')
+            ax.set_xlabel("Easting (m)")
+            ax.set_ylabel("Northing (m)")
+            fig_name = self.data.timestamp.strftime("%Y-%m-%d-%H-%M-%S-gnss-position.png")
+            fig.savefig(self.radar_dir / fig_name, format="png")
 
-        # Run unimoco on position output
-        self.data.unimoco(results['path'], self.config_gps_imu, self.moco_file)
+            # Run unimoco on position output
+            self.data.unimoco(results['path'], self.config_gps_imu, self.moco_file)
+
+            # Finishing touches using GDL procedures
+            (self / "mocos.done").touch()
 
         # Trackfinding
-        track_files = [f for f in self.moco_file.parent.glob("*_track.npz")]
+        track_files = [f for f in self.moco_file.parent.glob("*track.npz")]
         if track_files:
-            print(f"Found {len(track_files)} track files (*_track.npz).")
+            print(f"Found {len(track_files)} track files (*track.npz).")
             print("--> Will not run trackfinder")
         else:
-            trackfinder(self.moco_file)
+            trackfinder(self.moco_file, linear=linear)
 
-        # Finishing touches using GDL procedures
-        (self / "mocos.done").touch()
+        if linear == 0:
+            print("Setting things up ...", end=" ", flush=True)
+            gdl("construct,/para",capture=True)
+            sleep(0.2)
+            args = [(band, self.cross) for band in Settings().RADAR_BANDS if not (self.cross / f"processing_{band}.done").exists()]
+            if len(args) > 1:
+                with Pool(processes=min(os.cpu_count(), len(args))) as pool:
+                    pool.starmap(_proc, args)
+            elif len(args) == 1:
+                _proc(args[0])
+            print("done.")
 
-        print("Setting things up:", end=" ", flush=True)
-        gdl("construct,/para",capture=True)
-        sleep(0.5)
-        for i in self.track_list:
-            for j in self.band_list:
-                exec = self.band(i,j) / "execute"
-                if not exec.exists():
-                    gdl([f"proc,{j}"], capture=True)
-                    print("*", end="", flush=True)
-        print(" done.")
-    
-        print("Starting taskmon ...", flush=True)
-        subprocess.run(
-            ["bash",shutil.which('taskmon'), "&"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
+            for track in self.track_dirs:
+                (track / "track.npz").unlink(missing_ok=True)
+                (track / "track.npz").symlink_to(self.rawdata.resolve() / "moco" / self.dt.strftime(f"%Y-%m-%d-%H-%M-%S-{track.name}-track.npz"))
+                self.dem(track.name).unlink(missing_ok=True)
+                dem = self._set_dem(track.name)
+                if dem is None:
+                    warn(f"--> No valid DEM found for track {track.name}, will not inspect.")
+                else:
+                    self.dem(track.name).symlink_to(dem.resolve())
+                    print(f"--> Inspecting track {track.name} ...", end=" ", flush=True)
+                    fig, data = self.inspect(track=track.name)
+                    print("done.")
+                
+                    fig.savefig(track / "sar_parameters.svg")
+                    print(f"        > {track / "sar_parameters.svg"}")
+                    with open(track / "meta_data.json", "w") as f:
+                        json.dump(data, f, indent=4)
+                    print(f"        > {track / "metadata.json"}")
+            (self / "tracks").unlink(missing_ok=True)
+            (self / "tracks").symlink_to(self.cross)
+        
+            print("Starting taskmon ...", end=" ", flush=True)
+            subprocess.run(
+                ["bash",shutil.which('taskmon'), "&"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            print("done.")
+            print("--> Taskmon will now manage processes to populate processing subfolders.")
 
-        # Syntax for populating folders?
-        # {GDL>construct}
-        # {GDL>proc,X} with X for each band folder (2: LHH et.c.)
-        # taskmon should finish (or ./execute inside each folder)
-        # both run {GDL>image1} and {GDL>cleaner,1}
+            print("\nAll done.")
+        else:
+            print("Starting Radaz linear processor ...", flush=True)
+            gdl("proz")
+
+    def dem(self, track: int|str) -> Path:
+        return self.track_dir(track) / "DEM"
+
+    def _set_dem(self, track: int|str, dem_path: str|Path|None = None) -> Path|None:
+        t = self.track(track)
+        t.elevation(dem_path=dem_path)
+        t.save(self.track_file(track))
+        return t.dem_path
+
+    def get_dem(self, track: int|str, dem_path: str|Path|None = None) -> Path:
+        """Sets DEM for track to dem_path if passed. If not passed, sets DEM for track
+        from settings if not already set. Returns DEM path."""
+        if isinstance(track, str):
+            track = int(track)
+        path = self.dem(track)
+        if dem_path:
+            dem_path = Path(dem_path)
+            if dem_path.is_file():
+                if path.resolve() == dem_path:
+                    return dem_path
+                else:
+                    self._set_dem(track, dem_path=dem_path)
+                    path.unlink()
+                    path.symlink_to(dem_path)
+                    return dem_path
+            else:
+                raise RuntimeError(f"Target file does not exist: {dem_path}")
+        elif path.is_symlink():
+            return path.resolve()
+        dem_path = self._set_dem(track)
+        if dem_path is None:
+            raise RuntimeError("No valid DEM found")
+        path.symlink_to(dem_path)
+        return dem_path
+
+    def inspect(self, track: int|str, dem_path: str|Path|None = None) -> tuple[Figure, dict]:
+        if self.track_file(track) is None:
+            raise RuntimeError(f"Could not locate track file")
+        self.get_dem(track, dem_path=dem_path)
+        return self.model(track).evaluate()
+         
+    @property
+    def dt(self) -> datetime:
+        # Get date and timestamp
+        self.gather()
+        match = re.search(r'(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})', self.data.drone_imu_bin.name)
+        if match:
+            return parse_datetime_string(match.group(1), require_datetime=True)
+        else:
+            raise RuntimeError("Could not parse datetime")
 
     @property
+    def dt_string(self) -> str:
+        return self.dt.strftime("%Y-%m-%d-%H-%M-%S")
+        
+    @property
     def track_count(self) -> int|None:
-        return len(list(self.cross.iterdir())) if self.cross.is_dir() else None
+        return len(self.track_dirs) if self.cross.is_dir() else None
 
     @property
     def track_list(self) -> list[int]|None:
@@ -1339,13 +1435,33 @@ class ProcessingDir(LoadDir):
         return None
 
     @property
-    def tracks(self) -> list[Path]|None:
-        return list(self.cross.iterdir()) if self.cross.is_dir() else None
+    def track_dirs(self) -> list[Path]|None:
+        return [p for p in self.cross.iterdir() if p.is_dir()] if self.cross.is_dir() else None
 
+    def track_dir(self, track: int|str) -> Path:
+        if isinstance(track, str):
+            track = int(track)
+        return self.cross / f"{track:02d}"
+    
+    def track_file(self, track: int|str) -> Path:
+        if isinstance(track, str):
+            track = int(track)
+        file = (self.track_dir(track) / "track.npz").resolve()
+        if file.is_file():
+            return file
+        else:
+            return None
+
+    def track(self, track: int|str) -> Spiral:
+        return Spiral.load(self.track_file(track))
+
+    def model(self, track: int|str) -> SpiralModel:
+        return SpiralModel.load(self.track_file(track))
+    
     @property
     def band_count(self) -> int|None:
         first_track = self.cross / "01"
-        return len(list(first_track.iterdir())) if first_track.is_dir() else None
+        return len([p for p in first_track.iterdir() if p.is_dir()]) if first_track.is_dir() else None
 
     @property
     def band_list(self) -> list[int]|None:
@@ -1354,19 +1470,40 @@ class ProcessingDir(LoadDir):
         return None
 
     def band(self, track: int, band: int) -> Path:
-        return self.cross / f"{track:02d}" / str(band)
+        return self.cross / f"{track:02d}" / hex(band)
 
-    def bands(self) -> dict[int,dict[int, Path]]|None:
-        if self.track_count and self.band_count:
-            d = {}
-            for i in range(1,self.track_count+1):
-                t = f"{i:02d}"
-                d[i] = {}
-                for j in range(1,self.band_count+1):
-                    b = f"{j}"
-                    d[i][j] = self.cross / t / b
-            return d
-        return None
+    def bands(self, only_processing: bool = False) -> list[Path]|None:
+        if only_processing:
+            processing_bands = Settings().RADAR_BANDS
+            return [p for p in self.cross.glob('*/*') if p.is_dir() and int(p.name, 16) in processing_bands] if self.cross.is_dir() else None
+        return [p for p in self.cross.glob('*/*') if p.is_dir()] if self.cross.is_dir() else None
+
+    def band_info(self, band: int|str) -> str:
+        map = {
+            1: "CVV",
+            2: "LHH",
+            3: "LHV",
+            4: "PHH",
+            5: "CVV(i)",
+            6: "PHH(i)",
+            7: "LVV",
+            8: "LHH",
+            9: "PHV",
+            10: "PVV",
+            11: "PVH"
+        }
+
+        if isinstance(band, str):
+            band = int(band, 16)
+
+        return map[band]
+        
+    def metadata(self, track: int|str) -> dict:
+        try:
+            with open(self.track_dir(track) / "metadata.json", 'r') as f:
+                return json.load(f)
+        except:
+            return {"info": "Missing."}
     
     @property
     def preprocessing_done(self) -> bool:
@@ -1374,11 +1511,19 @@ class ProcessingDir(LoadDir):
 
     @property
     def info(self) -> dict:
-        info = {
-            "Preprocessing Done": self.preprocessing_done,
-            "Track Count": self.track_count,
-        }
+        track_dirs = self.track_dirs
+        info = {}
+        if track_dirs is None:
+            return
+        else:
+            for track_dir in track_dirs:
+                info[track_dir.name] = self.metadata(track_dir.name)["info"]
+
         return info
+
+    @property
+    def name(self) -> str:
+        return "Processing Directory"
     
 class TomoDir(LoadDir):
     _scene: TomoScene|None
@@ -1443,7 +1588,7 @@ class TomoDir(LoadDir):
         return self.scene.bands
 
     @property
-    def model(self) -> SARModel:
+    def model(self) -> SpiralModel:
         return self.scene.model
 
     def open(self, cached: bool = True, npar: int = cpu_count()) -> None:
@@ -1465,6 +1610,10 @@ class TomoDir(LoadDir):
             raise AttributeError("The _scene attribute is immutable")
         object.__setattr__(self, name, value)
 
+    @property
+    def name(self) -> str:
+        return "Tomogram Directory"
+    
 class TomoArchive(LoadDir):
     _scenes: TomoScenes|None
 
@@ -1548,3 +1697,7 @@ class TomoArchive(LoadDir):
         if name == "_scenes":
             raise AttributeError("The _scenes attribute is immutable")
         object.__setattr__(self, name, value)
+
+    @property
+    def name(self) -> str:
+        return "Tomogram Archive"

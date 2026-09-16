@@ -96,30 +96,32 @@ def verbose() -> None:
 
 @click.command()
 @click.argument("key")
-@click.argument("value")
+@click.argument("value", nargs=-1)
 def set(key, value) -> None:
-    """Set value for settings. Valid keys are:
-    RTKP_CONFIG, DATA_DIRS, PROCESSING_DIRS, TOMO_DIRS, SWEPOS_USERNAME, SWEPOS_PASSWORD, SWEPOS_COORDINATES, MOCOREF_LONGITUDE, MOCOREF_LATITUDE, MOCOREF_HEIGHT, MOCOREF_ANTENNA"""
+    """Set value for settings."""
     
     valid_keys = ["RADAZ_CONFIG", "RTKP_CONFIG", "DATA_DIRS", "PROCESSING_DIRS", "TOMO_DIRS", "SWEPOS_USERNAME", "SWEPOS_PASSWORD",
-                  "TARGET_FRAME", "MOCOREF_FRAME",
+                  "TARGET_FRAME", "MOCOREF_FRAME", "RADAR_BANDS",
                   "MOCOREF_LONGITUDE", "MOCOREF_LATITUDE", "MOCOREF_HEIGHT", "MOCOREF_ANTENNA", "SWEPOS_COORDINATES"]
     settings = Settings()
     if not key in valid_keys:
         raise RuntimeError(f"Invalid key {key}. Valid keys: {valid_keys}")
-    
+    if len(value) == 1:
+        value = value[0]
+    else:
+        value = list(value)
+
     settings.set(key, value)
     settings.save()
 
 @click.command()
 @click.argument("keys", nargs=-1)
 def clear(keys) -> None:
-    """Clear Settings value. Valid keys are:
-    RTKP_CONFIG, DATA_DIRS, PROCESSING_DIRS, TOMO_DIRS, SWEPOS_USERNAME, SWEPOS_PASSWORD, SWEPOS_COORDINATES, MOCOREF_LONGITUDE, MOCOREF_LATITUDE, MOCOREF_HEIGHT, MOCOREF_ANTENNA, DEMS, CANOPIES, MASKS"""
+    """Clear Settings value."""
     
     valid_keys = ["RTKP_CONFIG", "DATA_DIRS", "PROCESSING_DIRS", "TOMO_DIRS", "SWEPOS_USERNAME", "SWEPOS_PASSWORD",
                   "SATELLITES", "RECEIVERS", "MOCOREF_LONGITUDE", "MOCOREF_LATITUDE", "MOCOREF_HEIGHT", "MOCOREF_ANTENNA",
-                  "DEMS", "CANOPIES", "MASKS", "SWEPOS_COORDINATES"]
+                  "DEMS", "CANOPIES", "MASKS", "SWEPOS_COORDINATES", "RADAR_BANDS"]
     settings = Settings()
     default = Settings()
     default.reset()
@@ -137,8 +139,7 @@ def clear(keys) -> None:
 @click.option("--radome", help="Radome type", default="NONE")
 @click.option("--reference-frame", "rf", help="Specify Reference Frame (default: TARGET_FRAME)", default=None)
 def add(key, files, antenna: str|None, radome: str, rf: str) -> None:
-    """Add files or folders to TomoSAR. Valid keys are:
-    DEM, DEMS, CANOPY, CANOPIES, MASK, MASKS, RECEIVER"""
+    """Add files or folders to rd-tomo."""
     settings = Settings()
     # Convert to list
     files = [file for file in files]
@@ -150,11 +151,13 @@ def add(key, files, antenna: str|None, radome: str, rf: str) -> None:
 @click.argument("files", nargs=-1)
 @click.option("--antenna", help="Antenna type", default=None)
 @click.option("--radome", help="Radome type", default="NONE")
-def remove(key, files, antenna: str|None, radome: str) -> None:
-    """Remove files or folders from TomoSAR. Valid keys are:
-    DEM, DEMS, CANOPY, CANOPIES, MASK, MASKS, RECEIVER"""
+@click.option("--rf", help="Reference Frame (default: TARGET_FRAME)", default=None)
+def remove(key, files, antenna: str|None, radome: str, rf: str|None) -> None:
+    """Remove files or folders from rd-tomo."""
     settings = Settings()
+    if rf is None:
+        rf = settings.TARGET_FRAME
     # Convert to list
     files = [file for file in files]
-    settings.remove(key, files, antenna=antenna, radome=radome)
+    settings.remove(key, files, antenna=antenna, radome=radome, rf=rf)
     settings.save()

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .utils import warn
 from .core import ImageInfo, SliceInfo, TomoInfo, TomoScene, TomoScenes
-from .apperture import SARModel
+from .apperture import SpiralModel
 
 # Configuration constants
 DB0_1M2 = 5 * 10**3.75     # Raw backscatter corresponding to 1 dB across 1 meter squared

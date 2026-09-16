@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pyproj import Transformer, CRS
+from pyproj import Transformer, CRS, datadir
 from datetime import datetime, timedelta, timezone
 import numpy as np
 import numpy.typing as npt
@@ -8,9 +8,9 @@ import rasterio
 from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 
-from .config import Settings
+from .config import Settings, PACKAGE_PATH
 from .manager import resource
-from .utils import verify_dt64, verify_td64, Angles, IndexType
+from .utils import verify_dt64, verify_td64, Angles, IndexType, warn
 
 class ReferenceFrame:
     _frame: str
@@ -139,13 +139,13 @@ class ReferenceFrame:
         epsg = { 
             "ITRF2020": 9988,
             "ETRF2020": 10569,
-            "SWEREF99": 7928, 
-            "EUREF-FIN": 7926,
-            "EUREF-DK94": 7920,
-            "EUREF-EST97": 7926,
-            "LKS-94": 7930,
-            "LKS-92": 7914,
-            "EUREF89": 7922,
+            "SWEREF99": 4976, 
+            "EUREF-FIN": 10688,
+            "EUREF-DK94": 10890,
+            "EUREF-EST97": 4934,
+            "LKS-94": 4950,
+            "LKS-92": 4948,
+            "EUREF89": 10873,
         }
         return epsg[self.name]
     
@@ -160,13 +160,13 @@ class ReferenceFrame:
         epsg = { 
             "ITRF2020": 9989,
             "ETRF2020": 10570,
-            "SWEREF99": 7929, 
-            "EUREF-FIN": 7927,
-            "EUREF-DK94": 7921,
-            "EUREF-EST97": 7927,
-            "LKS-94": 7931,
-            "LKS-92": 7915,
-            "EUREF89": 7923,
+            "SWEREF99": 4977, 
+            "EUREF-FIN": 10689,
+            "EUREF-DK94": 10891,
+            "EUREF-EST97": 4935,
+            "LKS-94": 4951,
+            "LKS-92": 4949,
+            "EUREF89": 10874,
         }
         return epsg[self.name]
     
@@ -181,13 +181,13 @@ class ReferenceFrame:
         epsg = {
             "ITRF2020": 9989,
             "ETRF2020": 10570,
-            "SWEREF99": 7929,
-            "EUREF-FIN": 7927,
-            "EUREF-DK94": 7921,
-            "EUREF-EST97": 7927,
-            "LKS-94": 7931,
-            "LKS-92": 7915,
-            "EUREF89": 7923,
+            "SWEREF99": 4619,
+            "EUREF-FIN": 10690,
+            "EUREF-DK94": 10892,
+            "EUREF-EST97": 4180,
+            "LKS-94": 4669,
+            "LKS-92": 4661,
+            "EUREF89": 10875,
         }
         
         return epsg[self.name]
@@ -233,9 +233,28 @@ class ReferenceFrame:
         ITRF and ETRF require both lat and lon to be specified, and EUREF-DK94 require lon to be specified."""
 
         return CRS.from_epsg(self.proj_epsg(lat=lat,lon=lon))
+
+    @property
+    def orthometric_epsg(self) -> int:
+        """Currently available only for SWEREF99."""
+
+        match self.name:
+            case "SWEREF99":
+                epsg = 5628
+            case _:
+                raise RuntimeError("Not implemented")
+
+        return epsg
+
+    @property
+    def orthometric_crs(self) -> CRS:
+        """Currently available only for SWEREF99."""
+        return CRS.from_epsg(self.orthometric_epsg)
+
     
     def ecef_to_geo(self, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...]) -> tuple[float|np.ndarray, ...]:
         """Transforms ECEF coordinates to geodetic (lon, lat, h) in this Reference Frame"""
+        
         return Transformer.from_crs(f"EPSG:{self.ecef_epsg}", f"EPSG:{self.llh_epsg}", always_xy=True).transform(*coordinates)
     
     def geo_to_ecef(self, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...]) -> tuple[float|np.ndarray, ...]:
@@ -245,11 +264,28 @@ class ReferenceFrame:
     def proj(self, lat: np.ndarray|float, lon: np.ndarray|float) -> tuple[np.ndarray|float, np.ndarray|float]:
         """Projects latitude/longitude pairs to the projected map coordinates in this Reference Frame. All points
         are assumed to be in the same projected coordinate zone, matching those of the first coordinate pair."""
-    
-        ref_lat = np.asarray(lat)[0]
-        ref_lon = np.asarray(lon)[0]
+        if isinstance(lat, float):
+            ref_lat = lat
+        else:
+            ref_lat = np.asarray(lat)[0]
 
+        if isinstance(lon, float):
+            ref_lon = lon
+        else:
+            ref_lon = np.asarray(lon)[0]
+        
         return Transformer.from_crs(f"EPSG:{self.geo_epsg}", f"EPSG:{self.proj_epsg(lat=ref_lat, lon=ref_lon)}", always_xy=True).transform(lon, lat)
+
+    def orthometric(self, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...]) -> float|np.ndarray:
+        """Converts LLH ellipsoidal height to orthometric height."""
+        datadir.append_data_dir(str(PACKAGE_PATH / "resources"))
+        return Transformer.from_crs(f"EPSG:{self.llh_epsg}", f"EPSG:{self.orthometric_epsg}", always_xy=True).transform(*coordinates)[2]
+
+    def ellipsoidal(self, *coordinates: float|np.ndarray|tuple[float|np.ndarray, ...]) -> float|np.ndarray:
+        """Converts LLH orthometric height to ellipsoidal height."""
+        datadir.append_data_dir(str(PACKAGE_PATH / "resources"))
+        return Transformer.from_crs(f"EPSG:{self.orthometric_epsg}", f"EPSG:{self.llh_epsg}", always_xy=True).transform(*coordinates)[2]
+
 
 DeltaPosType = TypeVar('DeltaPosType', bound='DeltaPos')
 class DeltaPos:
@@ -704,6 +740,14 @@ class Pos:
 
         return self._enu.copy()
 
+    @property
+    def orthometric(self) -> npt.NDArray[np.floating]:
+        return self.frame.orthometric(self.lon, self.lat, self.h)
+
+    @property
+    def orthometric_llh(self) -> npt.NDArray[np.floating]:
+        return np.hstack(self.lon, self.lat, self.orthometric)
+
     def __len__(self) -> int:
         """Number of points"""
         if self._ecef is not None:
@@ -831,7 +875,7 @@ class Pos:
             return f"Pos({self.coords}, {f'shape={self.coords.shape}, ' if len(self) > 333 else ''}frame=({self.frame}), epoch={self.epoch})"
         return "Pos(None)"
 
-    def make(self, obj: Pos|npt.ArrayLike[np.floating], geodetic: bool = False, lat_first: bool = True) -> Pos:
+    def make(self, obj: Pos|npt.ArrayLike[np.floating], geodetic: bool = False, lat_first: bool = False) -> Pos:
         """Returns the object as a Pos object if possible, in the same reference frame."""
         time = False
         if isinstance(obj, Pos):
@@ -864,7 +908,8 @@ class Pos:
         if time:
             return Pos(obj, frame=self.frame, geodetic=geodetic, lat_first=lat_first)
         else:
-            return Pos(obj, epoch=self._epoch, frame=self.frame, geodetic=geodetic, lat_first=lat_first)
+            res =  Pos(obj, epoch=self._epoch, frame=self.frame, geodetic=geodetic, lat_first=lat_first)
+            return res
     
     def reframe(self, frame: str) -> Pos:
         """Changes the Reference Frame of the coordinates to the one specified"""
@@ -2101,7 +2146,8 @@ def _eutm(lat: np.ndarray|float, lon: np.ndarray|float) -> tuple[np.ndarray|floa
     Handles Norway and Svalbard special cases.
     """
     if lat is None or lon is None:
-        raise ValueError("Determining the UTM Zone requires longitude and latitude to be specified.")
+        warn("Determining the UTM Zone requires longitude and latitude to be specified.")
+        return (25831, 25832, 2583, 25835, 25837)
     if not isinstance(lat, np.ndarray):
         lat = np.asarray(lat)
     if not isinstance(lon, np.ndarray):
@@ -2153,7 +2199,8 @@ def _dktm(lon: float) -> int:
         int: EPSG code for the selected DKTM zone.
     """
     if lon is None:
-        raise ValueError("Determining the DKTM Zone requires longitude to be specified.")
+        warn("Determining the DKTM Zone requires longitude to be specified.")
+        return (4093, 4094, 4095, 4096)
     if lon < 9.5:
         return 4093  # DKTM1
     elif lon < 10.9:

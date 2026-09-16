@@ -10,9 +10,12 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 import re
+from pathlib import Path
 
 from .config import Frequencies, Beam
-from .utils import warn, normalized_rmse, linear_model_str, combine_stats, compute_stats, bin_by_angle, update_nested_dict, invert_nested_dict, format_duration
+from .utils import warn, normalized_rmse, linear_model_str, combine_stats, compute_stats, bin_by_angle, update_nested_dict, invert_nested_dict, format_duration, Angles
+from .trackfinding import Spiral
+from .position import Pos
 FREQUENCIES = Frequencies()
 BEAM = Beam()
 
@@ -88,119 +91,251 @@ class SARParaModel(BaseEstimator):
     def __str__(self) -> str:
         return str(self.expr)
     
-class SARModel(BaseEstimator):
-    def __init__(self, moco: pd.DataFrame = None, radius: str|pd.Series = "radius (m)", 
-                    flight_altitude: str|pd.Series = "flight_alt (m)", azimuth: str|pd.Series = "azimuth (deg)",):
+class SpiralModel(BaseEstimator):
+    def __init__(self, flight: Spiral):
         """
         A SARModel  ...
         """
-        self._radius = radius if isinstance(radius, pd.Series) else moco[radius] if radius in moco else None
-        self._flight_altitude = flight_altitude if isinstance(flight_altitude, pd.Series) else moco[flight_altitude] if flight_altitude in moco else None
-        self._azimuth = azimuth if isinstance(azimuth, pd.Series) else moco[azimuth] if azimuth in moco else None
-        if self._radius is None or self._flight_altitude is None or self._azimuth is None:
-            raise ValueError("Missing required data.")
-        self.n_turns = (self._azimuth.iloc[-1] - self._azimuth.iloc[0]) / 360
-        self.starting_azimuth = self._azimuth.iloc[0]
+
+        self.flight = flight
+        az = self.azimuth.unwrap(degrees=True)
+        self.n_turns = (az[-1] - az[0]) / 360
+        self.starting_azimuth = az[0]
+        self.theta = az - self.starting_azimuth
+        self._basic_models = {
+            'radius': LinearRegression().fit(self.theta.reshape(-1,1), self.flight.radius),
+            'altitude': LinearRegression().fit(self.theta.reshape(-1,1), self.flight.altitude),
+        }
+        self._linear_models = None
+        self._parameters = None
+        self._predictions = None
+        self._breakpoints = None
+        self._errors = None
+        self._sym_models = None
+
         # Bin data by angles
         vars = {
-            'radius': self._radius.values,
-            'flight_alt': self._flight_altitude.values,
+            'radius': self.radius,
+            'flight_alt': self.flight.altitude,
         }
-        self._binned_matrices, angle_key = bin_by_angle(self._azimuth.values, vars, units='degrees', rotate=True)
-        self.angle_key = angle_key
-        self.parameters = calculate_sar_parameters(self._binned_matrices, angle_key=angle_key)
-        self.theta = self._azimuth.values.reshape(-1,1) - self.starting_azimuth
-        # Fit initial linear models
-        self.linear_models = {
-            'radius': LinearRegression().fit(self.theta, self._radius.values),
-            'flight_altitude': LinearRegression().fit(self.theta, self._flight_altitude.values),
-        }
-        self.sym_models = None # Can be generated with generate_models() but is not needed for basic usage
-        # Generate predictions for all SAR parameters and fit linear models to them
-        predictions, breakpoints = _predict_sar_parameters(self.linear_models, phi=self._binned_matrices[angle_key], n_turns=round(self.n_turns))
-        phi = self._binned_matrices[angle_key].reshape(-1, 1)
-        for band, params in self.parameters.items():
-            self.linear_models[band] = {}
-            for param in params.columns:
-                if param == angle_key:
-                    continue
-                params['PRED_' + param] = predictions[band][param]
-                match = re.search(r'RoI \[(.*)\] \(m\)', param)
-                if match:
-                    pol = match[1]
-                    breakpoint = breakpoints[band][pol]
-                    if breakpoint.size != 0:
-                        breakpoint = breakpoint[0]
-                        self.linear_models[band][param] = (
-                            LinearRegression().fit(phi[:breakpoint], predictions[band][param][:breakpoint]),
-                            LinearRegression().fit(phi[breakpoint:], predictions[band][param][breakpoint:]),
-                            float(phi[breakpoint])
-                        )
-                        continue
-                self.linear_models[band][param] = LinearRegression().fit(phi, predictions[band][param])
+        self._binned_matrices, self.angle_key = bin_by_angle(az, vars, units='degrees', rotate=True)
 
     @property
-    def duration(self) -> str:
-        return format_duration(self.t[-1] - self.t[0], print_days=False) 
+    def radius(self) -> np.ndarray:
+        return self.flight.radius
 
-    def fit(self, X: np.ndarray, y=None):
-        warn("SARModel is pre-fitted during initialization with moco data, fit() does nothing.")
+    @property 
+    def azimuth(self) -> Angles:
+        return self.flight.azimuth
+
+    @property
+    def altitude(self) -> np.ndarray:
+        return self.flight.altitude
+
+    @property
+    def duration(self) -> np.timedelta64:
+        return self.flight.dur()
+
+    @property
+    def phi(self) -> np.ndarray:
+        return self._binned_matrices[self.angle_key]
+
+    @property
+    def center(self) -> Pos:
+        return self.flight.center
+
+    @property
+    def track(self) -> Pos:
+        return self.flight.pos
+    
+    @property
+    def parameters(self) -> dict[str, pd.DataFrame]:
+        if not hasattr(self, '_parameters'):
+            self._parameters = None
+        if self._parameters is None:
+            self._parameters = self._calculate_sar_parameters()
+        return self._parameters
+
+    @property
+    def predictions(self) -> dict[str, pd.DataFrame]:
+        if not hasattr(self, '_predictions'):
+            self._predictions = None
+        if self._predictions is None:
+            self._predictions, self._breakpoints = self._predict_sar_parameters()
+        return self._predictions
+
+    @property
+    def breakpoints(self) -> defaultdict:
+        if not hasattr(self, '_breakpoints'):
+            self._breakpoints = None
+        if self._breakpoints is None:
+            self._predictions, self._breakpoints = self._predict_sar_parameters()
+        return self._breakpoints
+
+    @property
+    def basic_models(self) -> dict[str, LinearRegression]:
+        if not hasattr(self, '_basic_models'):
+            self._basic_models = {
+                'radius': LinearRegression().fit(self.theta.reshape(-1,1), self.flight.radius),
+                'altitude': LinearRegression().fit(self.theta.reshape(-1,1), self.flight.altitude),
+            }
+        return self._basic_models
+
+    @property
+    def linear_models(self) -> dict[str, dict[str, LinearRegression]]:
+        if not hasattr(self, '_linear_models'):
+            self._linear_models = None
+        if self._linear_models is None:
+            self._linear_models = {}
+            for band, params in self.parameters.items():
+                self._linear_models[band] = {}
+                for param in params.columns:
+                    if param == self.angle_key:
+                        continue
+                    match = re.search(r'RoI \[(.*)\] \(m\)', param)
+                    if match:
+                        pol = match[1]
+                        breakpoint = self.breakpoints[band][pol]
+                        if breakpoint.size != 0:
+                            breakpoint = breakpoint[0]
+                            self._linear_models[band][param] = (
+                                LinearRegression().fit(self.phi[:breakpoint].reshape(-1,1), self.predictions[band][param][:breakpoint]),
+                                LinearRegression().fit(self.phi[breakpoint:].reshape(-1,1), self.predictions[band][param][breakpoint:]),
+                                float(self.phi[breakpoint])
+                            )
+                            continue
+                    self._linear_models[band][param] = LinearRegression().fit(self.phi.reshape(-1,1), self.predictions[band][param])
+
+        return self._linear_models
+
+    def _get_errors(self) -> defaultdict[str, dict[str, tuple[float, float]]]:
+            """
+            Returns the errors associated with the linear SAR parameter models as a nested dict with the first key specifying the band
+            and the second key specifying the parameter. Each value consists of a tuple with RMSE in the first position and NRMSE in the second.
+            """
+            errors = defaultdict(dict)
+            for band, df in self.parameters.items():
+                for col, val in df.items():
+                    if col == self.angle_key:
+                        continue
+                    true = val.to_numpy()
+                    pred = self.parameters[band][col].to_numpy()
+                    errors[band][col] = (root_mean_squared_error(true, pred), normalized_rmse(true, pred))
+    
+            return errors
+
+    @property
+    def errors(self) -> dict[str, dict[str, tuple[float, float]]]:
+        if not hasattr(self, '_errors'):
+            self._errors = None
+        if self._errors is None:
+            self._errors = self._get_errors()
+
+        return self._errors
+
+    @property
+    def sym_models(self) -> defaultdict[str, dict[str, SARParaModel]]:
+        if not hasattr(self, '_sym_models'):
+            self._sym_models = None
+        if self._sym_models is None:
+            self._sym_models = self._model_sar_parameters()
+
+        return self._sym_models
+
+    @classmethod
+    def load(cls, path: str|Path):
+        return cls(Spiral.load(path))
+        
+    def fit(self, X: np.ndarray, Y: None|np.ndarray = None):
+        warn("SpiralModel fitting is done with flight data: fit() does nothing")
         return self # No fitting needed
     
-    def evaluate(self) -> tuple[Figure, defaultdict[dict]]:
-        model_evaluation = defaultdict(dict)
+    def evaluate(self) -> tuple[Figure, dict[str, dict[str, dict]]]:
+        model_evaluation = {}
         fig, axs = plt.subplots(3, 6, figsize=(18, 9), squeeze=False)
         first_idx = None
         roi_idx = None
         i = 0
+
+        # Basic models
+        pred_radius = self.basic_models['radius'].predict(self.theta.reshape(-1,1))
+        pred_alt = self.basic_models['altitude'].predict(self.theta.reshape(-1,1))
+        model_evaluation["info"] = {
+            "t_start": str(self.track.dt[0]),
+            "t_end": str(self.track.dt[-1]),
+            "center_lat": self.center.lat[0],
+            "center_lon": self.center.lon[0],
+            "center_easting": self.center.easting[0],
+            "center_northing": self.center.northing[0],
+            "radius": {
+                "model": linear_model_str(self.basic_models['radius'], var='theta', rounded=True),
+                "RMSE": f"{root_mean_squared_error(self.radius, pred_radius):.3g}",
+                "top": f"{pred_radius[0]:.2f}",
+                "bot": f"{pred_radius[-1]:.2f}",
+                "max": f"{self.radius.max():.2f}",
+                "min": f"{self.radius.min():.2f}"
+            },
+            "altitude": {
+                "model": linear_model_str(self.basic_models['altitude'], var='theta', rounded=True),
+                "RMSE": f"{root_mean_squared_error(self.altitude, pred_alt):.3g}",
+                "top": f"{pred_alt[0]:.2f}",
+                "bot": f"{pred_alt[-1]:.2f}",
+                "max": f"{self.altitude.max():.2f}",
+                "min": f"{self.altitude.min():.2f}"
+            }
+        }
+        # Linear models
         for band, df in self.parameters.items():
+            model_evaluation[band] = {}
+            x = df[self.angle_key].to_numpy()
             j = 0
-            x = df[self.angle_key].values
-            for col in df.columns:
-                if 'PRED_' in col:
-                    idx = (i,j)
-                    roi = False
-                    style = '-'
-                    var = col[5:]
-                    pred = df[col]
-                    if var in df:
-                        if 'RoI' in var:
-                            name = 'RoI (m)'
-                            if band == 'L-band':
-                                roi = True
-                                if roi_idx is None:
-                                    roi_idx = idx
-                                else:
-                                    idx = roi_idx
-                                if var == 'RoI [V-pol] (m)':
-                                    pol = 'V-pol'
-                                    style = '--'
-                                if var == 'RoI [H-pol] (m)':
-                                    pol = 'H-pol'
+            for col, val in df.items():
+                if col == self.angle_key:
+                    continue
+                idx = (i,j)
+                style = '-'
+                roi = False
+                if 'RoI' in col:
+                    name = 'RoI (m)'
+                    if band == 'L-band':
+                        roi = True
+                        if roi_idx is None:
+                            roi_idx = idx
                         else:
-                            name = var
-                        ax = axs[*idx]
-                        true = df[var]
-                        rmse = root_mean_squared_error(true, pred)
-                        nrmse = normalized_rmse(true,pred)
-                        ax.plot(x, true, color='C0', linestyle=style, label='True' if first_idx is None and not roi else pol if roi else None)
-                        ax.plot(x, pred, color='C1', linestyle=style, label='Predicted' if first_idx is None and not roi else pol if roi else None)
-                        if roi:
-                            ax.legend()
-                        ax.set_xlabel('theta (deg)')
-                        ax.set_ylabel(name)
-                        ax.set_title(band)
-                        model_evaluation[band][var] = {
-                            'Model': linear_model_str(self.linear_models[band][var], var='theta', rounded=True) if isinstance(self.linear_models[band][var], LinearRegression) else linear_model_str(self.linear_models[band][var][0], var='theta', rounded=True) + f" for theta < {self.linear_models[band][var][2]:.2f} and else " + linear_model_str(self.linear_models[band][var][1]),
-                            'RMSE': f"{rmse:.3g}",
-                            'NRMSE': f"{nrmse:.3g}"
-                        }
-                    else:
-                        raise RuntimeError(f"{band} values of {var} not found.")
-                    if first_idx is None and not roi:
-                        first_idx = (i,j)
-                    if not roi or pol == 'H-pol':
-                        j += 1
+                            idx = roi_idx
+                        if col == 'RoI [V-pol] (m)':
+                            pol = 'V-pol'
+                            style = '--'
+                        if col == 'RoI [H-pol] (m)':
+                            pol = 'H-pol'
+                else:
+                    name = col
+                ax = axs[*idx]
+                true = val.to_numpy()
+                pred = self.predictions[band][col].to_numpy()
+                rmse, nrmse = self.errors[band][col]
+
+                ax.plot(x, true, color='C0', linestyle=style, label='True' if first_idx is None and not roi else pol if roi else None)
+                ax.plot(x, pred, color='C1', linestyle=style, label='Predicted' if first_idx is None and not roi else pol if roi else None)
+                if roi:
+                    ax.legend()
+                ax.set_xlabel('phi (deg)')
+                ax.set_ylabel(name)
+                ax.set_title(band)
+                model_evaluation[band][col] = {
+                    'Model': linear_model_str(
+                            self.linear_models[band][col],
+                            var='phi',
+                            rounded=True
+                        ) if isinstance(self.linear_models[band][col], LinearRegression) else 
+                        linear_model_str(self.linear_models[band][col][0], var='phi', rounded=True) + f" for theta < {self.linear_models[band][col][2]:.2f} and else " + linear_model_str(self.linear_models[band][col][1], var='phi', rounded=True),
+                    'RMSE': f"{rmse:.3g}",
+                    'NRMSE': f"{nrmse:.3g}"
+                }
+                if first_idx is None and not roi:
+                    first_idx = (i,j)
+                if not roi or pol == 'H-pol':
+                    j += 1
             i += 1
 
         handles, labels = axs[*first_idx].get_legend_handles_labels()
@@ -208,45 +343,12 @@ class SARModel(BaseEstimator):
 
         plt.tight_layout(rect=[0, 0, 1, 0.95])
 
-        evaluation = invert_nested_dict(model_evaluation)
+        # model_evaluation = invert_nested_dict(model_evaluation)
 
-        return fig, evaluation
+        return fig, model_evaluation
                     
     def nominalize(self) -> dict:
         return combine_stats(*compute_stats(self.parameters)) # Placeholder for converting SAR parameters to nominal values
-    
-    def errors(self) -> dict[str, dict[str, tuple[float, float]]]:
-        """
-        Returns the errors associated with the linear SAR parameter models as a nested dict with the first key specifying the band
-        and the second key specifying the parameter. Each value consists of a tuple with RMSE in the first position and NRMSE in the second.
-        """
-        errors = self.errors
-        for band, df in self.parameters.items():
-            for col in df.columns:
-                if "PRED_" in col:
-                    val = col[5:]
-                    pred = df[col]
-                    if val in df.columns:
-                        true = df[val]
-                        rmse = root_mean_squared_error(true, pred)
-                        nrmse = normalized_rmse(true,pred)
-                        errors[band][val] = (rmse, nrmse)
-
-        return errors
- 
-    # Generate symbolic models for all SAR parameters based on fitted linear models of radius, flight altitude and angular sampling frequency
-    def generate_models(self, angle_name: str = "phi") -> dict[str, SARParaModel]:
-        """
-        Generate a dict of SARParaModel instances for each SAR parameter based on the fitted linear models:
-        - 'VRes (m)': vertical resolution
-        - 'HRes (m)': horizontal resolution
-        - 'HoA (m)': height of ambiguity
-        - 'RoI (m)': radius of constant illumination
-        - 'BWC': relative bandwidth coverage
-        - 'BWG': relative bandwidth gap number
-        """
-        self.sym_models = model_sar_parameters(self.linear_models, round(self.n_turns), angle_name=angle_name)
-        return self.sym_models
         
     # Symbolic prediction of specified parameter, band and polarization (if applicable)
     def predict(self, X: np.ndarray, band: str, parameter: str, pol: str = "", cache: bool = False):
@@ -325,8 +427,13 @@ class SARModel(BaseEstimator):
                 self.linearize(band=band, parameter=key, x=az)
                 pass
     
-    def copy(self) -> 'SARModel':
-        new_model = SARModel(radius=self._radius.copy(), flight_altitude=self._flight_altitude.copy(), azimuth=self._azimuth.copy())
+    def copy(self) -> 'SpiralModel':
+        new_model = SpiralModel(self.flight.copy())
+        new_model._parameters = self._parameters
+        new_model._predictions = self._predictions
+        new_model._breakpoints = self._breakpoints
+        new_model._sym_models = self._sym_models
+        
         return new_model
     
     def offset(self, x_offset: np.ndarray = None, y_offset: np.ndarray = None, z_offset: np.ndarray = None):
@@ -345,7 +452,7 @@ class SARModel(BaseEstimator):
         theta = self._azimuth
         x = r * np.cos(theta)
         y = r * np.sin(theta)
-        z = self._flight_altitude
+        z = self.altitude
 
         # Ensure offsets are numpy arrays
         arrays = []
@@ -382,308 +489,356 @@ class SARModel(BaseEstimator):
 
         return r_prime, theta_prime, z_prime
 
+    def _predict_sar_parameters(self) -> tuple[dict[str, pd.DataFrame], defaultdict]:
+
+        models = self.basic_models
+        phi = self.phi
+        n_turns = self.n_turns
+
+        # Constants
+        # radius = k + a * phi
+        k = models['radius'].intercept_
+        a = models['radius'].coef_[0]
+        # flight_altitude = m - b * phi
+        m = models['altitude'].intercept_
+        b = -models['altitude'].coef_[0]
+        k0 = math.sqrt(math.log(2)/math.pi) # Constant for taking -3 dB resolution vertically
+        n = n_turns - 1
+
+        # t = 1 / (2aV) * (r * sqrt(a**2 + r**2) + a**2 * log(r + sqrt(a**2 + r**2)))
+
+        # Generate predictions
+        predictions = defaultdict(dict)
+        breakpoints = defaultdict(dict)
+        r0 = k +  a * (phi + 180 * n)
+        alt0 = m - b * (phi + 180 * n)
+        beta = math.atan(b / a)
+        psi0 = np.atan(r0/alt0) # Mean look angle (nominal)
+        l0 = 360 * n * np.sqrt(a**2 + b**2) # Maximal tomographic apperture
+        p0 = np.sqrt(r0**2 + alt0**2) # Slant range at line-of-sight (nominal)
+        l = l0 * np.abs(np.cos(beta - psi0)) # Effective tomographic apperture
+        for band, bandwidth, central_frequency in FREQUENCIES.zip():
+            bz = bandwidth*np.cos(psi0) + central_frequency*np.sin(psi0) * l/p0 # Extended vertical bandwidth
+            predictions[band]['VRes (m)'] = k0*c / bz # Vertical resolution
+            predictions[band]['HRes (m)'] = 1.12*c /(2*np.pi * central_frequency * np.sin(psi0)) # Horizontal resolution
+            predictions[band]['HoA (m)'] = 0.5*c * n_turns * np.sin(psi0) * p0 / (l*central_frequency) # Height of ambiguity
+            # Model bandwidth coverage
+            previous_upper_bound = None
+            for i in reversed(range(round(n_turns))):
+                r = k + a * (phi + 360 * i)
+                h = m - b * (phi + 360 * i)
+                psi = np.atan(r / h)
+                lower_bound = (central_frequency - 0.5*bandwidth) * np.cos(psi)
+                upper_bound = (central_frequency + 0.5*bandwidth) * np.cos(psi)
+                if previous_upper_bound is None:
+                    previous_upper_bound = upper_bound
+                    bwc = bandwidth * np.cos(psi)
+                    gaps = np.zeros_like(phi)
+                    continue
+                bwc += bandwidth * np.cos(psi) - np.maximum(0, previous_upper_bound - lower_bound)
+                gaps += lower_bound > previous_upper_bound
+                previous_upper_bound = upper_bound    
+            predictions[band]['BWC'] = bwc / bz
+            predictions[band]['BWG'] = gaps / (n_turns - 1)
+
+        for (band, pol), beamwidth, da in BEAM.zip():
+            theta_far = np.pi * ((da - beamwidth/2))/180 # Far-range depression angle in radians
+            theta_near = np.pi * ((90 - da - beamwidth/2))/180 # Near-range depression angle in radians 
+            r1 = (m - b * (phi + 360*n))/np.tan(theta_far) - (k + a * (phi + 360*n))
+            r2 = (k + a * phi) - (m - b * phi)*np.tan(theta_near)
+            horizonx = theta_far < 0
+            predictions[band][f'RoI [{pol}] (m)'] = r2 if horizonx else np.minimum(r1,r2)
+            # Boolean array: True where r1 < r2, False where r2 <= r1
+            is_r1_min = r1 < r2
+            # Find where the minimum switches (i.e., where is_r1_min changes value)
+            switch_point = np.where(np.diff(is_r1_min.astype(int)) != 0)[0]
+            breakpoints[band][pol] = switch_point
+
+        for band, d in predictions.items():
+            predictions[band] = pd.DataFrame(d)
+
+        return predictions, breakpoints
+
+    def _shape_parameters(self) -> dict[str, np.ndarray]:
+        result = {}
+        result[self.angle_key] = self.phi
+        result['n_turns'] = np.sum(~np.isnan(self._binned_matrices['radius']), axis=1)
+        for key, matrix in self._binned_matrices.items():
+            if key == self.angle_key:
+                continue
+            result[key+'_top'] = np.apply_along_axis(lambda row: row[~np.isnan(row)][0] if np.any(~np.isnan(row)) else np.nan, axis=1, arr=matrix)
+            result[key+'_bot'] = np.apply_along_axis(lambda row: row[~np.isnan(row)][-1] if np.any(~np.isnan(row)) else np.nan, axis=1, arr=matrix)
+
+        return result
+
+    def _compute_bandwidth_coverage(self, n_turns: float|None = None) -> dict[str, pd.DataFrame]:
+        # Helper function to get bandwidth coverage
+        def get_bandwidth_coverage(f_array, B_array) -> list[np.ndarray]:
+                """
+                f_array: np.ndarray of shape (N, W) — central frequencies
+                B_array: np.ndarray of shape (N, W) — bandwidths
+                Returns: list of N arrays, each containing merged intervals for that row
+                """
+                N, W = f_array.shape
+                merged_intervals_per_row = []
+
+                for i in range(N):
+                    f_row = f_array[i]
+                    B_row = B_array[i]
+
+                    # Compute lower and upper bounds
+                    lower_bounds = f_row - B_row / 2
+                    upper_bounds = f_row + B_row / 2
+
+                    # Stack into intervals and sort by lower bound
+                    intervals = np.stack((lower_bounds, upper_bounds), axis=1)
+                    intervals = intervals[np.argsort(intervals[:, 0])]
+                    intervals = intervals[~np.isnan(intervals).any(axis=1)]
+                    if len(intervals) == 0:
+                        merged_intervals_per_row.append(np.empty((0, 2)))
+                        continue
+
+                    # Merge overlapping intervals
+                    merged = []
+                    current = intervals[0]
+                    for next in intervals[1:]:
+                        if next[0] <= current[1] + np.finfo(float).eps:  # Overlapping or adjacent
+                            current[1] = max(current[1], next[1])
+                        else:
+                            merged.append(current)
+                            current = next
+                    merged.append(current)
+
+                    merged_intervals_per_row.append(np.array(merged))
+
+                return merged_intervals_per_row
+        
+        # Helper function to summarize bandwidth
+        def summarize_intervals(intervals_list) -> pd.DataFrame:
+            summaries = []
+            for intervals in intervals_list:
+                if len(intervals) == 0:
+                    summaries.append({
+                        'bandwidth_coverage': 0,
+                        'bandwidth_gaps': 0
+                    })
+                    continue
+
+                widths = intervals[:, 1] - intervals[:, 0]
+                total_width = np.nansum(widths)
+                span = intervals[-1, 1] - intervals[0, 0]
+                coverage = total_width / span if span > 0 else 0
+                num_gaps = len(intervals) - 1
+
+                summaries.append({
+                    'BWC': coverage,
+                    'BWG': num_gaps
+                })
+            summaries = {key: np.array([d[key] for d in summaries]) for key in summaries[0]}
+            summaries['BWG'] = summaries['BWG'] / (n_turns - 1)
+            return pd.DataFrame(summaries)
+
+        if n_turns is None:
+            n_turns = np.sum(~np.isnan(self._binned_matrices['radius']), axis=1)
+
+        # Look angle
+        psi = np.arctan(self._binned_matrices['radius'] / self._binned_matrices['flight_alt'])
+        results = {}
+        for band, bw, cf in FREQUENCIES.zip():
+            f_z = cf * np.cos(psi)
+            b_z = bw * np.cos(psi)
+            results[band] = summarize_intervals(get_bandwidth_coverage(f_z, b_z))
+
+        return results
+
+    def _calculate_sar_parameters(self) -> dict[str, pd.DataFrame]:
+        """
+        Input: shapes (pd.DataFrame) with columns:
+            - angle_name
+            - 'radius_top'
+            - 'radius_bot'
+            - 'flight_alt_top'
+            - 'flight_alt_bot'
+            - 'n_turns'
+
+        Output: a dict with keys 'C-band', 'L-band', 'P-band' with pd.DataFarmes containing columns:
+            - angle_name
+            - 'VRes (m)': vertical resolution
+            - 'HRes (m)': horizontal resolution
+            - 'HoA (m)': height of ambiguity
+            - 'RoI [pol] (m)': radius of constant illumination, with 'pol' indicating the available polarizations
+            - 'BWC': relative bandwidth coverage
+            - 'BWG': relative bandwidth gap number 
+        """
+        
+        shapes = self._shape_parameters()
+        sar_parameters = defaultdict(dict)
+
+        # Calculate help values
+        dr = shapes['radius_bot'] - shapes['radius_top'] # Radius variation
+        r0 = (shapes['radius_top'] + shapes['radius_bot'])/2 # Mean radius
+        dalt = shapes['flight_alt_top'] - shapes['flight_alt_bot'] # Altitude variation
+        alt0 = (shapes['flight_alt_top'] + shapes['flight_alt_bot'])/2 # Mean altitude
+        beta = np.atan(dalt/dr) # Tomographic apperture slant
+        psi0 = np.atan(r0/alt0) # Mean look angle (nominal)
+        l0 = np.sqrt(dr**2 + dalt**2) # Maximal tomographic apperture
+        p0 = np.sqrt(r0**2 + alt0**2) # Slant range at line-of-sight (nominal)
+        l = l0 * abs(np.cos(beta - psi0)) # Effective tomographic apperture
+        k0 = np.sqrt(np.log(2)/np.pi) # Constant for taking -3 dB resolution vertically
+
+        # Calculate frequency dependent parameters
+        for band, b, f in FREQUENCIES.zip():
+            bz = b * np.cos(psi0) + f * np.sin(psi0) * l/p0 # Extended vertical bandwidth (nominal)
+            sar_parameters[band]['VRes (m)'] = k0*c / bz # Vertical -3 dB resolution (nominal)
+            sar_parameters[band]['HRes (m)'] = 1.12 * c / (f * 2*np.pi * np.sin(psi0)) # Horizontal -3 dB resolution (nominal)
+            sar_parameters[band]['HoA (m)'] = shapes['n_turns'] * np.sin(psi0) * c * p0 / (2 * l * f) # Height of ambiguity
+
+        # Calculate beam shape dependent parametrs
+        for (band, pol), bw, da in BEAM.zip():
+            theta_far = np.deg2rad((da - bw/2)) # Far-range depression angle
+            theta_near = np.deg2rad((90 - da - bw/2)) # Near-range depression angle
+            r1 = np.maximum(0, shapes['flight_alt_bot'] / np.tan(theta_far) - shapes['radius_bot']) # Limit at the base of the flight path
+            r2 = np.maximum(0, shapes['radius_top'] - shapes['flight_alt_top'] * np.tan(theta_near)) # Limit at the top of the flight path 
+            horizonx = theta_far < 0 # The beam crosses the horizon
+            sar_parameters[band][f'RoI [{pol}] (m)'] = r2 if horizonx else np.minimum(r1,r2)
+
+        # Convert to a dict of DataFrames
+        for band, d in sar_parameters.items():
+            sar_parameters[band] = pd.DataFrame(d)
+            sar_parameters[band].insert(0, self.angle_key, shapes[self.angle_key])
+        
+        # Compute bandwidth coverage
+        bwc = self._compute_bandwidth_coverage(n_turns=shapes['n_turns'])
+
+        # Merge the bandwidth coverage results into sar_parameters
+        update_nested_dict(sar_parameters, bwc)
+
+        return sar_parameters
+
+    def _model_sar_parameters(self, angle_name: str = "phi") -> defaultdict[str, dict[str, SARParaModel]]:
+        """
+        Input: models (dict) and n_turns (the nominal number of complete turns of the spiral).
+            - models contains keys "radius" and "altitude"
+            - each value is a LinearRegression() object fitted against drone moco.
+
+        Output: sar_models (dict) with SARParaModel as values and keys:
+            - 'VRes (m)': vertical resolution
+            - 'HRes (m)': horizontal resolution
+            - 'HoA (m)': height of ambiguity
+            - 'RoI (m)': radius of constant illumination
+            - 'BWC': relative bandwidth coverage
+            - 'BWG': relative bandiwdth gap number
+        """
+        models = self.basic_models
+        n_turns = round(self.n_turns)
+
+        ## Constants
+        # radius = k + a * phi
+        k = models['radius'].intercept_
+        a = models['radius'].coef_[0]
+        # flight_altitude = m - b * phi
+        m = models['altitude'].intercept_
+        b = -models['altitude'].coef_[0]
+        k0 = math.sqrt(math.log(2)/math.pi) # Constant for taking -3 dB resolution vertically
+        n = n_turns - 1
+
+        # t = 1 / (2aV) * (r * sqrt(a**2 + r**2) + a**2 * log(r + sqrt(a**2 + r**2)))
+
+        # Generate symbolic expressions
+        expr = defaultdict(dict)
+        phi = sp.Symbol(angle_name, real=True, nonnegative=True) # Wrapped angle
+        r0 = k +  a * (phi + 180 * n)
+        alt0 = m - b * (phi + 180 * n)
+        beta = math.atan(b / a)
+        psi0 = sp.atan(r0/alt0) # Mean look angle (nominal)
+        l0 = 360 * n * sp.sqrt(a**2 + b**2) # Maximal tomographic apperture
+        p0 = sp.sqrt(r0**2 + alt0**2) # Slant range at line-of-sight (nominal)
+        l = l0 * sp.Abs(sp.cos(beta - psi0)) # Effective tomographic apperture
+        for band, bandwidth, central_frequency in FREQUENCIES.zip():
+            bz = bandwidth*sp.cos(psi0) + central_frequency*sp.sin(psi0) * l/p0 # Extended vertical bandwidth
+            expr[band]['VRes (m)'] = k0*c / bz # Vertical resolution
+            expr[band]['HRes (m)'] = 1.12*c /(2*sp.pi * central_frequency * sp.sin(psi0)) # Horizontal resolution
+            expr[band]['HoA (m)'] = 0.5*c * n_turns * sp.sin(psi0) * p0 / (l*central_frequency) # Height of ambiguity
+            # Model bandwidth coverage
+            previous_upper_bound = None
+            for i in reversed(range(n_turns)):
+                r = k + a * (phi + 360 * i)
+                h = m - b * (phi + 360 * i)
+                psi = sp.atan(r / h)
+                lower_bound = (central_frequency - 0.5*bandwidth) * sp.cos(psi)
+                upper_bound = (central_frequency + 0.5*bandwidth) * sp.cos(psi)
+                if previous_upper_bound is None:
+                    previous_upper_bound = upper_bound
+                    bwc = bandwidth * sp.cos(psi)
+                    gaps = 0
+                    continue
+                bwc += bandwidth * sp.cos(psi) - sp.Max(0, previous_upper_bound - lower_bound)
+                gaps += sp.Piecewise(
+                    (1, lower_bound > previous_upper_bound),
+                    (0, True)
+                )
+                previous_upper_bound = upper_bound    
+            expr[band]['BWC'] = bwc / bz
+            expr[band]['BWG'] = gaps / (n_turns - 1)
+        for (band, pol), beamwidth, da in BEAM.zip():
+            theta_far = sp.pi * ((da - beamwidth/2))/180 # Far-range depression angle in radians
+            theta_near = sp.pi * ((90 - da - beamwidth/2))/180 # Near-range depression angle in radians 
+            r1 = (m - b * (phi + 360*n))/sp.tan(theta_far) - (k + a * (phi + 360*n))
+            r2 = (k + a * phi) - (m - b * phi)*sp.tan(theta_near)
+            horizonx = theta_far < 0
+            expr[band][f'RoI [{pol}] (m)'] = sp.Piecewise(
+                (r2, horizonx),
+                (sp.Min(r1,r2), True)
+            )
+
+
+        # Create sar_models dict
+        sar_model = defaultdict(dict)
+        for band, expressions in expr.items():
+            for key, expr in expressions.items():
+                sar_model[band][key] = SARParaModel(expr=expr)
+
+        return sar_model
 
     def __repr__(self) -> str:
-        return f"SARModel(n_turns={self.n_turns:.2f}, duration={self.duration}) fitted from (radius={self._radius}, flight_altitude={self._flight_altitude}, azimuth={self._azimuth})"
+        return f"SpiralModel(n_turns={self.n_turns:.2f}, duration={self.duration}) fitted from (radius={self.radius}, altitude={self.altitude}, azimuth={self.azimuth})"
     
     def __str__(self) -> str:
-        return f"SARModel over a duration of {self.duration} and {self.n_turns:.2f} turns."
-
-def calculate_sar_parameters(binned_matrices: dict[str,np.ndarray], angle_key: str = None) -> dict[pd.DataFrame]:
-    """
-    Input: shapes (pd.DataFrame) with columns:
-        - angle_name
-        - 'radius_top'
-        - 'radius_bot'
-        - 'flight_alt_top'
-        - 'flight_alt_bot'
-        - 'n_turns'
-
-    Output: a dict with keys 'C-band', 'L-band', 'P-band' with pd.DataFarmes containing columns:
-        - angle_name
-        - 'VRes (m)': vertical resolution
-        - 'HRes (m)': horizontal resolution
-        - 'HoA (m)': height of ambiguity
-        - 'RoI [pol] (m)': radius of constant illumination, with 'pol' indicating the available polarizations
-        - 'BWC': relative bandwidth coverage
-        - 'BWG': relative bandwidth gap number 
-    """
-    
-    shapes = _shape_parameters(binned_matrices=binned_matrices, angle_key=angle_key)
-    sar_parameters = defaultdict(dict)
-
-    # Calculate help values
-    dr = shapes['radius_bot'] - shapes['radius_top'] # Radius variation
-    r0 = (shapes['radius_top'] + shapes['radius_bot'])/2 # Mean radius
-    dalt = shapes['flight_alt_top'] - shapes['flight_alt_bot'] # Altitude variation
-    alt0 = (shapes['flight_alt_top'] + shapes['flight_alt_bot'])/2 # Mean altitude
-    beta = np.atan(dalt/dr) # Tomographic apperture slant
-    psi0 = np.atan(r0/alt0) # Mean look angle (nominal)
-    l0 = np.sqrt(dr**2 + dalt**2) # Maximal tomographic apperture
-    p0 = np.sqrt(r0**2 + alt0**2) # Slant range at line-of-sight (nominal)
-    l = l0 * abs(np.cos(beta - psi0)) # Effective tomographic apperture
-    k0 = np.sqrt(np.log(2)/np.pi) # Constant for taking -3 dB resolution vertically
-    # Calculate frequency dependent parameters
-    for band, b, f in FREQUENCIES.zip():
-        bz = b * np.cos(psi0) + f * np.sin(psi0) * l/p0 # Extended vertical bandwidth (nominal)
-        sar_parameters[band]['VRes (m)'] = k0*c / bz # Vertical -3 dB resolution (nominal)
-        sar_parameters[band]['HRes (m)'] = 1.12 * c / (f * 2*np.pi * np.sin(psi0)) # Horizontal -3 dB resolution (nominal)
-        sar_parameters[band]['HoA (m)'] = shapes['n_turns'] * np.sin(psi0) * c * p0 / (2 * l * f) # Height of ambiguity
-    # Calculate beam shape dependent parametrs
-    for (band, pol), bw, da in BEAM.zip():
-        theta_far = np.deg2rad((da - bw/2)) # Far-range depression angle
-        theta_near = np.deg2rad((90 - da - bw/2)) # Near-range depression angle
-        r1 = np.maximum(0, shapes['flight_alt_bot'] / np.tan(theta_far) - shapes['radius_bot']) # Limit at the base of the flight path
-        r2 = np.maximum(0, shapes['radius_top'] - shapes['flight_alt_top'] * np.tan(theta_near)) # Limit at the top of the flight path 
-        horizonx = theta_far < 0 # The beam crosses the horizon
-        sar_parameters[band][f'RoI [{pol}] (m)'] = r2 if horizonx else np.minimum(r1,r2)
-
-    # Convert to a dict of DataFrames
-    for band, d in sar_parameters.items():
-        sar_parameters[band] = pd.DataFrame(d)
-        sar_parameters[band].insert(0, angle_key, shapes[angle_key])
-    
-    # Compute bandwidth coverage
-    bwc = _compute_bandwidth_coverage(binned_matrices=binned_matrices, n_turns=shapes['n_turns'])
-    # Merge the bandwidth coverage results into sar_parameters
-    update_nested_dict(sar_parameters, bwc)
-
-    return sar_parameters
-
-def _shape_parameters(binned_matrices, angle_key) -> dict[str, np.ndarray]:
-    result = {}
-    result[angle_key] = binned_matrices[angle_key]
-    result['n_turns'] = np.sum(~np.isnan(binned_matrices['radius']), axis=1)
-    for key, matrix in binned_matrices.items():
-        if key == angle_key:
-            continue
-        result[key+'_top'] = np.apply_along_axis(lambda row: row[~np.isnan(row)][0] if np.any(~np.isnan(row)) else np.nan, axis=1, arr=matrix)
-        result[key+'_bot'] = np.apply_along_axis(lambda row: row[~np.isnan(row)][-1] if np.any(~np.isnan(row)) else np.nan, axis=1, arr=matrix)
-
-    return result
-
-def _compute_bandwidth_coverage(binned_matrices: dict, n_turns: np.ndarray = None) -> dict[pd.DataFrame]:
-    # Helper function to get bandwidth coverage
-    def get_bandwidth_coverage(f_array, B_array) -> list[np.ndarray]:
-        """
-        f_array: np.ndarray of shape (N, W) — central frequencies
-        B_array: np.ndarray of shape (N, W) — bandwidths
-        Returns: list of N arrays, each containing merged intervals for that row
-        """
-        N, W = f_array.shape
-        merged_intervals_per_row = []
-
-        for i in range(N):
-            f_row = f_array[i]
-            B_row = B_array[i]
-
-            # Compute lower and upper bounds
-            lower_bounds = f_row - B_row / 2
-            upper_bounds = f_row + B_row / 2
-
-            # Stack into intervals and sort by lower bound
-            intervals = np.stack((lower_bounds, upper_bounds), axis=1)
-            intervals = intervals[np.argsort(intervals[:, 0])]
-            intervals = intervals[~np.isnan(intervals).any(axis=1)]
-            if len(intervals) == 0:
-                merged_intervals_per_row.append(np.empty((0, 2)))
-                continue
-
-            # Merge overlapping intervals
-            merged = []
-            current = intervals[0]
-            for next in intervals[1:]:
-                if next[0] <= current[1] + np.finfo(float).eps:  # Overlapping or adjacent
-                    current[1] = max(current[1], next[1])
-                else:
-                    merged.append(current)
-                    current = next
-            merged.append(current)
-
-            merged_intervals_per_row.append(np.array(merged))
-
-        return merged_intervals_per_row
-    # Helper function to summarize bandwidth
-    def summarize_intervals(intervals_list) -> pd.DataFrame:
-        summaries = []
-        for intervals in intervals_list:
-            if len(intervals) == 0:
-                summaries.append({
-                    'bandwidth_coverage': 0,
-                    'bandwidth_gaps': 0
-                })
-                continue
-
-            widths = intervals[:, 1] - intervals[:, 0]
-            total_width = np.nansum(widths)
-            span = intervals[-1, 1] - intervals[0, 0]
-            coverage = total_width / span if span > 0 else 0
-            num_gaps = len(intervals) - 1
-
-            summaries.append({
-                'BWC': coverage,
-                'BWG': num_gaps
-            })
-        summaries = {key: np.array([d[key] for d in summaries]) for key in summaries[0]}
-        summaries['BWG'] = summaries['BWG'] / (n_turns - 1)
-        return pd.DataFrame(summaries)
-
-    if n_turns is None:
-        n_turns = np.sum(~np.isnan(binned_matrices['radius']), axis=1)
-
-    # Look angle
-    psi = np.arctan(binned_matrices['radius'] / binned_matrices['flight_alt'])
-    results = {}
-    for band, bw, cf in FREQUENCIES.zip():
-        f_z = cf * np.cos(psi)
-        b_z = bw * np.cos(psi)
-        results[band] = summarize_intervals(get_bandwidth_coverage(f_z, b_z))
-
-    return results
-
-def _predict_sar_parameters(models: dict, phi: np.ndarray, n_turns: int) -> dict:
-    ## Constants
-    # radius = k + a * phi
-    k = models['radius'].intercept_
-    a = models['radius'].coef_[0]
-    # flight_altitude = m - b * phi
-    m = models['flight_altitude'].intercept_
-    b = -models['flight_altitude'].coef_[0]
-    k0 = math.sqrt(math.log(2)/math.pi) # Constant for taking -3 dB resolution vertically
-    n = n_turns - 1
-
-    # t = 1 / (2aV) * (r * sqrt(a**2 + r**2) + a**2 * log(r + sqrt(a**2 + r**2)))
-
-    # Generate predictions
-    predictions = defaultdict(dict)
-    breakpoints = defaultdict(dict)
-    r0 = k +  a * (phi + 180 * n)
-    alt0 = m - b * (phi + 180 * n)
-    beta = math.atan(b / a)
-    psi0 = np.atan(r0/alt0) # Mean look angle (nominal)
-    l0 = 360 * n * np.sqrt(a**2 + b**2) # Maximal tomographic apperture
-    p0 = np.sqrt(r0**2 + alt0**2) # Slant range at line-of-sight (nominal)
-    l = l0 * np.abs(np.cos(beta - psi0)) # Effective tomographic apperture
-    for band, bandwidth, central_frequency in FREQUENCIES.zip():
-        bz = bandwidth*np.cos(psi0) + central_frequency*np.sin(psi0) * l/p0 # Extended vertical bandwidth
-        predictions[band]['VRes (m)'] = k0*c / bz # Vertical resolution
-        predictions[band]['HRes (m)'] = 1.12*c /(2*np.pi * central_frequency * np.sin(psi0)) # Horizontal resolution
-        predictions[band]['HoA (m)'] = 0.5*c * n_turns * np.sin(psi0) * p0 / (l*central_frequency) # Height of ambiguity
-        # Model bandwidth coverage
-        previous_upper_bound = None
-        for i in reversed(range(n_turns)):
-            r = k + a * (phi + 360 * i)
-            h = m - b * (phi + 360 * i)
-            psi = np.atan(r / h)
-            lower_bound = (central_frequency - 0.5*bandwidth) * np.cos(psi)
-            upper_bound = (central_frequency + 0.5*bandwidth) * np.cos(psi)
-            if previous_upper_bound is None:
-                previous_upper_bound = upper_bound
-                bwc = bandwidth * np.cos(psi)
-                gaps = np.zeros_like(phi)
-                continue
-            bwc += bandwidth * np.cos(psi) - np.maximum(0, previous_upper_bound - lower_bound)
-            gaps += lower_bound > previous_upper_bound
-            previous_upper_bound = upper_bound    
-        predictions[band]['BWC'] = bwc / bz
-        predictions[band]['BWG'] = gaps / (n_turns - 1)
-    for (band, pol), beamwidth, da in BEAM.zip():
-        theta_far = np.pi * ((da - beamwidth/2))/180 # Far-range depression angle in radians
-        theta_near = np.pi * ((90 - da - beamwidth/2))/180 # Near-range depression angle in radians 
-        r1 = (m - b * (phi + 360*n))/np.tan(theta_far) - (k + a * (phi + 360*n))
-        r2 = (k + a * phi) - (m - b * phi)*np.tan(theta_near)
-        horizonx = theta_far < 0
-        predictions[band][f'RoI [{pol}] (m)'] = r2 if horizonx else np.minimum(r1,r2)
-        # Boolean array: True where r1 < r2, False where r2 <= r1
-        is_r1_min = r1 < r2
-        # Find where the minimum switches (i.e., where is_r1_min changes value)
-        switch_point = np.where(np.diff(is_r1_min.astype(int)) != 0)[0]
-        breakpoints[band][pol] = switch_point
+        return f"SpiralModel over a duration of {self.duration} and {self.n_turns:.2f} turns."
 
 
-    return predictions, breakpoints
+## Model spiral tracks
+# def model_spirals(tracks, path, dry, verbose, npar: int = os.cpu_count()):
+#     with Pool(processes=npar) as pool:
+#         results = pool.starmap(_model, [(i, track, dry) for i, track in tracks.items()])
 
-def model_sar_parameters(models: dict, n_turns: int, angle_name: str = "phi") -> dict[SARModel]:
-    """
-    Input: models (dict) and n_turns (the nominal number of complete turns of the spiral).
-        - models contains keys "radius" and "flight_altitude"
-        - each value is a LinearRegression() object fitted against drone moco.
+#         for i, fig, evaluation in sorted(results, key=lambda x: x[0]):
+#             if verbose:
+#                 print(f"Spiral {i}:", end=" ", flush=True)
+#                 print(json.dumps(evaluation, indent=4))
+#             if not dry:
+#                 fig_path = path.with_name(path.stem + f"-{i:02}_spiral_model.pdf")
+#                 eval_path = fig_path.with_suffix(".json")
+#                 fig.savefig(fig_path, format="pdf")
+#                 with open(eval_path, 'w') as dst:
+#                     json.dump(evaluation, dst, indent=4)
+#                 print(f"Model evaluation for Spiral {i} saved to {fig_path} and {eval_path}")
 
-    Output: sar_models (dict) with SARModel as values and keys:
-        - 'VRes (m)': vertical resolution
-        - 'HRes (m)': horizontal resolution
-        - 'HoA (m)': height of ambiguity
-        - 'RoI (m)': radius of constant illumination
-        - 'BWC': relative bandwidth coverage
-        - 'BWG': relative bandiwdth gap number
-    """
-    ## Constants
-    # radius = k + a * phi
-    k = models['radius'].intercept_
-    a = models['radius'].coef_[0]
-    # flight_altitude = m - b * phi
-    m = models['flight_altitude'].intercept_
-    b = -models['flight_altitude'].coef_[0]
-    k0 = math.sqrt(math.log(2)/math.pi) # Constant for taking -3 dB resolution vertically
-    n = n_turns - 1
+# def _model(i: int, track: pd.DataFrame, dry: bool = False) -> tuple[int, Figure, defaultdict[dict]]:
+#     model = SARModel(track)
+#     fig, evaluation = model.evaluate()
+#     try:
+#         fig.canvas.manager.set_window_title(f"SAR parameters: Spiral {i}")
+#     except Exception:
+#         pass
+#     if dry:
+#         if i == 1:
+#             print("Showing model plots ...", end=" ", flush=True)
+#         plt.show()
+#         if i == 1:
+#             print("done.")
 
-    # t = 1 / (2aV) * (r * sqrt(a**2 + r**2) + a**2 * log(r + sqrt(a**2 + r**2)))
-
-    # Generate symbolic expressions
-    expr = defaultdict(dict)
-    phi = sp.Symbol(angle_name, real=True, nonnegative=True) # Wrapped angle
-    r0 = k +  a * (phi + 180 * n)
-    alt0 = m - b * (phi + 180 * n)
-    beta = math.atan(b / a)
-    psi0 = sp.atan(r0/alt0) # Mean look angle (nominal)
-    l0 = 360 * n * sp.sqrt(a**2 + b**2) # Maximal tomographic apperture
-    p0 = sp.sqrt(r0**2 + alt0**2) # Slant range at line-of-sight (nominal)
-    l = l0 * sp.Abs(sp.cos(beta - psi0)) # Effective tomographic apperture
-    for band, bandwidth, central_frequency in FREQUENCIES.zip():
-        bz = bandwidth*sp.cos(psi0) + central_frequency*sp.sin(psi0) * l/p0 # Extended vertical bandwidth
-        expr[band]['VRes (m)'] = k0*c / bz # Vertical resolution
-        expr[band]['HRes (m)'] = 1.12*c /(2*sp.pi * central_frequency * sp.sin(psi0)) # Horizontal resolution
-        expr[band]['HoA (m)'] = 0.5*c * n_turns * sp.sin(psi0) * p0 / (l*central_frequency) # Height of ambiguity
-        # Model bandwidth coverage
-        previous_upper_bound = None
-        for i in reversed(range(n_turns)):
-            r = k + a * (phi + 360 * i)
-            h = m - b * (phi + 360 * i)
-            psi = sp.atan(r / h)
-            lower_bound = (central_frequency - 0.5*bandwidth) * sp.cos(psi)
-            upper_bound = (central_frequency + 0.5*bandwidth) * sp.cos(psi)
-            if previous_upper_bound is None:
-                previous_upper_bound = upper_bound
-                bwc = bandwidth * sp.cos(psi)
-                gaps = 0
-                continue
-            bwc += bandwidth * sp.cos(psi) - sp.Max(0, previous_upper_bound - lower_bound)
-            gaps += sp.Piecewise(
-                (1, lower_bound > previous_upper_bound),
-                (0, True)
-            )
-            previous_upper_bound = upper_bound    
-        expr[band]['BWC'] = bwc / bz
-        expr[band]['BWG'] = gaps / (n_turns - 1)
-    for (band, pol), beamwidth, da in BEAM.zip():
-        theta_far = sp.pi * ((da - beamwidth/2))/180 # Far-range depression angle in radians
-        theta_near = sp.pi * ((90 - da - beamwidth/2))/180 # Near-range depression angle in radians 
-        r1 = (m - b * (phi + 360*n))/sp.tan(theta_far) - (k + a * (phi + 360*n))
-        r2 = (k + a * phi) - (m - b * phi)*sp.tan(theta_near)
-        horizonx = theta_far < 0
-        expr[band][f'RoI [{pol}] (m)'] = sp.Piecewise(
-            (r2, horizonx),
-            (sp.Min(r1,r2), True)
-        )
-
-
-    # Create sar_models dict
-    sar_model = defaultdict(dict)
-    for band, expressions in expr.items():
-        for key, expr in expressions.items():
-            sar_model[band][key] = SARParaModel(expr=expr)
-
-    return sar_model
+#     return i, fig, evaluation
 
 
 # if variance:  # propagate variance

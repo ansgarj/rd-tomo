@@ -24,7 +24,7 @@ from typing import KeysView, ValuesView, ItemsView, Any, Iterator
 from .utils import warn, collect_statistics, estimaterr, apply_variable_descriptions, parse_datetime_string
 from .manager import writable
 from .tomogram_processing import multilook, filter
-from .apperture import SARModel
+from .apperture import SpiralModel
 from .config import Settings
 
 ### Custom classes
@@ -1403,12 +1403,12 @@ class TomoScene:
     tomograms: dict[str, TomoInfo] = field(default_factory=dict)
     _info: dict[str, float] = field(default_factory=dict)
     track: pd.DataFrame = field(default_factory=pd.DataFrame)
-    _model: SARModel = None
+    _model: SpiralModel = None
     
     @property
-    def model(self) -> SARModel:
+    def model(self) -> SpiralModel:
         if self._model is None:
-            self._model = SARModel(self.track)
+            self._model = SpiralModel(self.track)
         return self._model
 
     def items(self):
@@ -1487,7 +1487,7 @@ class TomoScene:
             raise FileNotFoundError(f".moco cut CSV file '{moco_file}' not found in the .tomo directory.")
         # Load the moco data
         tomo_scene.moco = pd.read_csv(moco_file)
-        tomo_scene._model = SARModel(tomo_scene.moco)
+        tomo_scene._model = SpiralModel(tomo_scene.moco)
 
         # Load the tomograms
         bands = [band for band in path.iterdir()

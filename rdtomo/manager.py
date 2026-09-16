@@ -315,7 +315,7 @@ def tmp(*args, temporary: bool = True, allow_dir: bool = False) -> Iterator[Path
             unlink(paths)
 
 # VRT
-def build_vrt(vrt_path: Path|str, paths: list[str]) -> Path:
+def build_vrt(vrt_path: Path|str, paths: list[str]) -> None:
     """
     Build a .vrt mosaic from all .tif files, returning the file path if a single GeoTIFF file is passed
     """

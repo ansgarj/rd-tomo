@@ -254,6 +254,24 @@ class Settings:
         if not path.is_file():
             raise FileNotFoundError(f"The file {value} does not exist")
         self.data["RADAZ_CONFIG"] = str(path.resolve())
+
+    @property
+    def RADAR_BANDS(self) -> list[int]:
+        return self.RADAR.get("BANDS", None)
+
+    @RADAR_BANDS.setter
+    def RADAR_BANDS(self, value: int|list[int]):
+        if isinstance(value, int):
+            if value in self.RADAR_BANDS:
+                pass
+            elif self.RADAR_BANDS is not None:
+                self.RADAR["BANDS"].append(value)
+            else:
+                self.RADAR["BANDS"] = [value]
+        elif isinstance(value, list) and isinstance(int(value[0], 16), int):
+            self.RADAR["BANDS"] = [int(v, 16) for v in value]
+        else:
+            raise TypeError(f"Only integers or list of integers can be assigned to RADAR_BANDS, not {type(value)}")
     
     @property
     def PPK_CONFIG(self) -> Path:
@@ -403,7 +421,7 @@ class Settings:
             self.FILES[key][rf] = files
 
     def remove(self, key, files: str|Path|list[str|Path], **kwargs) -> None:
-        valid_keys = ["DEM", "DEMS", "CANOPY", "CANOPIES", "MASK", "MASKS", "RECEIVER"]
+        valid_keys = ["DEM", "DEMS", "CANOPY", "CANOPIES", "MASK", "MASKS", "RECEIVER", "RADAR_BANDS"]
         if key not in valid_keys:
             raise KeyError(f"Invalid key {key}. Valid keys: {valid_keys}")
         if not isinstance(files, list):
@@ -437,7 +455,7 @@ class Settings:
 
     @property
     def DEMS(self) -> list[str]:
-        return self.FILES["DEMS"][self.TARGET_FRAME]
+        return self.FILES["DEMS"]
        
     @property
     def CANOPIES(self) -> list[str]:
@@ -555,6 +573,7 @@ DEFAULT = {
         "MASKS": {}
     },
     "RADAR": {
+        "BANDS": [2, 3, 5, 6, 7, 8],
         "POLARIZATIONS": {
             "P-band": ["H-pol"],
             "L-band": ["H-pol", "V-pol"],

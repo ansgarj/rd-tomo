@@ -8,7 +8,8 @@ from ..config import PROJECT_PATH
 from .setup_tools import dependencies, setup, warmup, update_version_file
 from .settings_tools import settings, default, verbose, add, set, clear, remove
 from .interact_tools import load, sliceinfo
-from .processing_tools import forge, trackfinder, station_ppp, fetch_swepos, mocoref, extract_reach, init
+from .processing_tools import forge, trackfinder, station_ppp, fetch_swepos, mocoref, extract_reach, init, inspect, info
+from .dem_tools import dem
 from .test_tools import test
 
 # Dev tools
@@ -79,6 +80,11 @@ rdtomo.add_command(fetch_swepos)
 rdtomo.add_command(init)
 rdtomo.add_command(trackfinder)
 rdtomo.add_command(forge)
+rdtomo.add_command(inspect)
+rdtomo.add_command(info)
+
+## DEMs
+rdtomo.add_command(dem)
 
 ## Python interactive console entry ponts
 rdtomo.add_command(sliceinfo)
