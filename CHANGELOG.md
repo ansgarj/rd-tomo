@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.1] - Unreleased
+## [0.2.1] - 2026-09-16
 
 ### Added
 - rd-tomo settings now contain a key `RADAR_BANDS` located under `RADAR` -> `BANDS` which contains an integer list which specifies which processing folders are to be populated (default: `[2, 3, 5, 6, 7, 8]`)
